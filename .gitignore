@@ -1,0 +1,54 @@
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+*.tfplan
+.terraformrc
+terraform.rc
+
+# Terraform variable files
+*.tfvars
+*.tfvars.json
+
+# Terraform lock file
+# Keep .terraform.lock.hcl committed for real Terraform projects.
+# It is intentionally NOT ignored.
+
+# Environment variables and secrets
+.env
+.env.*
+*.secret
+*.secrets
+
+# SSH and certificates
+*.pem
+*.key
+*.pfx
+*.p12
+
+# Azure local files
+.azure/
+
+# Kubernetes configuration
+kubeconfig
+*.kubeconfig
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Operating system
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+
+# Logs
+*.log
