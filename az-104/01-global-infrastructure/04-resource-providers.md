@@ -181,26 +181,6 @@ Microsoft.ContainerService
 
 The provider can then be registered before retrying the deployment.
 
-## Common Mistakes
-
-### Azure Resource Provider is a Terraform plugin
-
-Incorrect.
-
-The Terraform provider and Azure Resource Provider are separate components.
-
-### ARM creates the Storage Account itself
-
-Incorrect.
-
-ARM coordinates the request. `Microsoft.Storage` exposes and handles the Storage Account resource operations.
-
-### Registering a provider creates resources
-
-Incorrect.
-
-Registration only enables the subscription to use that provider.
-
 ## Interview Questions
 
 1. What is an Azure Resource Provider?
