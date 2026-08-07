@@ -147,26 +147,6 @@ rg-all-keyvaults
 
 The second approach can make application lifecycle management more difficult because related resources are distributed across unrelated Resource Groups.
 
-## Common Mistakes
-
-### Resource Group is a billing boundary
-
-Not exactly.
-
-A subscription is the primary Azure billing boundary. Resource Groups can still be useful for cost analysis and organization.
-
-### Resources in one Resource Group must use the same region
-
-Incorrect.
-
-Resources within a Resource Group can exist in different regions.
-
-### One resource can belong to multiple Resource Groups
-
-Incorrect.
-
-A resource belongs to one Resource Group at a time.
-
 ## Interview Questions
 
 1. What is the primary responsibility of a Microsoft Entra tenant?
