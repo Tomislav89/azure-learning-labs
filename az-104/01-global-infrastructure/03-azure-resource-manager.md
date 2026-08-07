@@ -152,26 +152,6 @@ The refresh token has expired due to inactivity.
 
 This is an authentication issue rather than a Resource Provider deployment problem.
 
-## Common Mistakes
-
-### ARM directly creates every Azure resource
-
-Incorrect.
-
-ARM coordinates the request and forwards service-specific operations to the appropriate Azure Resource Provider.
-
-### ARM manages Terraform state
-
-Incorrect.
-
-Terraform manages its own state.
-
-### SSH into a VM is an ARM management operation
-
-No.
-
-ARM manages the Azure VM resource. SSH is access to the operating system/workload running inside the VM.
-
 ## Interview Questions
 
 1. What is Azure Resource Manager?
