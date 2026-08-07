@@ -119,26 +119,6 @@ Disaster Recovery
         loss of an entire region
 ```
 
-## Common Mistakes
-
-### Region Pair means automatic replication
-
-Incorrect.
-
-Region pairing does not automatically create or replicate application infrastructure.
-
-### Availability Zone equals exactly one datacenter
-
-Not necessarily.
-
-An Availability Zone is a physically separate location with independent infrastructure and may consist of one or more datacenters.
-
-### Multiple zones automatically guarantee availability
-
-Incorrect.
-
-The application architecture must be designed to use multiple zones correctly.
-
 ## Interview Questions
 
 1. What is the difference between an Azure geography and an Azure region?
