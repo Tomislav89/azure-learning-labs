@@ -1,0 +1,36 @@
+location            = "East US"
+resource_group_name = "rg-example-dev"
+
+vnet_name          = "vnet-networking-dev"
+vnet_address_space = ["10.70.0.0/16"]
+
+web_subnet_name   = "snet-web"
+web_subnet_prefix = "10.70.1.0/24"
+
+app_subnet_name   = "snet-app"
+app_subnet_prefix = "10.70.2.0/24"
+
+private_endpoints_subnet_name   = "snet-private-endpoints"
+private_endpoints_subnet_prefix = "10.70.3.0/24"
+
+web_nsg_name         = "nsg-web-dev"
+app_route_table_name = "rt-app-dev"
+
+nat_gateway_name   = "nat-networking-dev"
+nat_public_ip_name = "pip-nat-networking-dev"
+
+peer_vnet_name          = "vnet-peer-dev"
+peer_vnet_address_space = ["10.80.0.0/16"]
+peer_subnet_name         = "snet-peer"
+peer_subnet_prefix       = "10.80.1.0/24"
+
+storage_account_name  = "stexampleunique123"
+private_endpoint_name = "pe-storage-blob-dev"
+
+private_dns_zone_name = "privatelink.blob.core.windows.net"
+
+tags = {
+  Environment = "DEV"
+  Project     = "AZ-104-Networking"
+  ManagedBy   = "Terraform"
+}
