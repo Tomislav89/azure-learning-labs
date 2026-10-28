@@ -320,12 +320,171 @@ It does not create, update, or destroy Azure resources.
 
 ---
 
+## Lab 4 – Azure Authentication with GitHub Actions OIDC
+
+### Objective
+
+Authenticate GitHub Actions to Microsoft Azure securely using
+OpenID Connect (OIDC), without storing passwords or client secrets
+in GitHub.
+
+### Architecture
+
+GitHub Actions
+    |
+    | GitHub-issued OIDC token
+    v
+Microsoft Entra ID
+    |
+    | Federated Identity Credential validation
+    v
+App Registration / Service Principal
+    |
+    | Azure RBAC authorization
+    v
+Azure Resource Group
+
+### App Registration
+
+Created an application registration named:
+
+`github-actions-terraform-oidc`
+
+The App Registration defines the application identity and contains
+the Federated Identity Credential used to establish trust with GitHub.
+
+### Service Principal
+
+Created a Service Principal associated with the App Registration.
+
+The Service Principal represents the application identity in our
+Microsoft Entra tenant and is the security principal to which
+Azure RBAC roles are assigned.
+
+### Federated Identity Credential
+
+Configured a Federated Identity Credential with:
+
+- Name: `github-main-oidc`
+- Issuer: `https://token.actions.githubusercontent.com`
+- Audience: `api://AzureADTokenExchange`
+- Repository: `Tomislav89/azure-learning-labs`
+- Branch: `main`
+
+The subject must match the subject claim in the GitHub-issued
+OIDC token exactly.
+
+During this lab, the initial authentication failed with:
+
+`AADSTS700213: No matching federated identity record found`
+
+The GitHub token contained a subject with numeric repository and
+owner identifiers, while the original Federated Identity Credential
+used repository and owner names only.
+
+We updated the Federated Identity Credential to match the actual
+GitHub OIDC subject and successfully reran the workflow.
+
+### Azure RBAC
+
+Created a dedicated Resource Group:
+
+`rg-github-oidc-lab`
+
+Location: `northeurope`
+
+Assigned the Service Principal the `Reader` role at the Resource
+Group scope only.
+
+This follows the principle of least privilege:
+
+- The workflow can read resources in the lab Resource Group.
+- The workflow cannot modify or delete those resources.
+- No subscription-wide Contributor or Owner role was granted.
+- The Terraform state Resource Group remains outside this role scope.
+
+### GitHub Actions Workflow
+
+Workflow file:
+
+`.github/workflows/azure-oidc.yml`
+
+Workflow name:
+
+`Azure OIDC Login Test`
+
+Trigger:
+
+`workflow_dispatch`
+
+The workflow is started manually from the GitHub Actions interface.
+
+Required GitHub Actions permissions:
+
+- `id-token: write` – allows the workflow to request an OIDC token.
+- `contents: read` – allows read access to repository contents.
+
+The workflow uses `azure/login@v2` with:
+
+- Azure Client ID
+- Microsoft Entra Tenant ID
+- Azure Subscription ID
+
+These identifiers are not passwords or client secrets.
+
+### Workflow Steps
+
+1. Login to Azure using OIDC.
+2. Verify the Azure subscription and tenant.
+3. Read the `rg-github-oidc-lab` Resource Group.
+
+### Result
+
+The GitHub Actions workflow completed successfully.
+
+This confirmed that:
+
+- GitHub Actions could obtain an OIDC token.
+- Microsoft Entra ID accepted the federated identity.
+- The workflow authenticated as the application identity.
+- Azure RBAC permitted reading the lab Resource Group.
+- No client secret or personal user password was required.
+
+### Authentication vs. Authorization
+
+Authentication answers:
+
+Who are you?
+
+OIDC and Microsoft Entra ID handle authentication.
+
+Authorization answers:
+
+What are you allowed to do?
+
+Azure RBAC handles authorization.
+
+A successful login does not automatically grant permission
+to manage Azure resources.
+
+### Key Takeaways
+
+- App Registration defines the application identity.
+- Service Principal represents that identity in the tenant.
+- Federated Identity Credentials establish OIDC trust.
+- OIDC avoids long-lived client secrets in GitHub.
+- GitHub OIDC subject claims must match exactly.
+- Azure RBAC should use the smallest practical scope.
+- `id-token: write` does not grant Azure write permissions.
+- `workflow_dispatch` enables manual workflow execution.
+
+---
+
 ## Future Labs
 
 The following topics are planned but are not yet implemented
 in the current Terraform CI workflow:
 
-- Azure authentication using GitHub Actions OIDC
 - GitHub Actions permissions and environment protection
 - Terraform plan automation
 - Controlled Terraform apply
