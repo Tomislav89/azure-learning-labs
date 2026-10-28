@@ -1,0 +1,33 @@
+name: Azure OIDC Login Test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  azure-login:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Login to Azure using OIDC
+        uses: azure/login@v2
+        with:
+          client-id: e0a670f6-2928-49a3-8532-aff461e897b8
+          tenant-id: 40553eb6-3bdc-49f5-80a3-0b69c3a8cad3
+          subscription-id: 86d4c7aa-bdab-457c-a0f5-f8cfb043e58d
+
+      - name: Verify Azure identity
+        run: |
+          az account show \
+            --query "{Subscription:name,SubscriptionId:id,TenantId:tenantId}" \
+            -o table
+
+      - name: Read lab Resource Group
+        run: |
+          az group show \
+            --name rg-github-oidc-lab \
+            --query "{Name:name,Location:location,State:properties.provisioningState}" \
+            -o table
