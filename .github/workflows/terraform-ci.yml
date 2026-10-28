@@ -12,12 +12,18 @@ permissions:
 
 jobs:
   terraform-validation:
-    name: Terraform Validation
+    name: Terraform Validation (${{ matrix.directory }})
     runs-on: ubuntu-24.04
 
-    defaults:
-      run:
-        working-directory: terraform-advanced/environments/workspaces-lab
+    strategy:
+      fail-fast: false
+      matrix:
+        directory:
+          - terraform-advanced/environments/dev-separated/networking
+          - terraform-advanced/environments/dev-separated/compute
+          - terraform-advanced/environments/test
+          - terraform-advanced/environments/lifecycle-lab
+          - terraform-advanced/environments/workspaces-lab
 
     steps:
       - name: Checkout repository
@@ -29,10 +35,13 @@ jobs:
           terraform_version: "1.15.8"
 
       - name: Terraform Format Check
+        working-directory: ${{ matrix.directory }}
         run: terraform fmt -check -recursive .
 
       - name: Terraform Init
+        working-directory: ${{ matrix.directory }}
         run: terraform init -backend=false -input=false
 
       - name: Terraform Validate
+        working-directory: ${{ matrix.directory }}
         run: terraform validate
