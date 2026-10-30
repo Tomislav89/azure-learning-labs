@@ -16,5 +16,6 @@ resource "azurerm_storage_account" "lab" {
     environment = "lab"
     managed_by  = "terraform"
     project     = "github-actions"
+    owner       = "devops-lab"
   }
 }
