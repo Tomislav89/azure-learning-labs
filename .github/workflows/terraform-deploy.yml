@@ -2,14 +2,27 @@ name: Terraform Azure Deployment
 
 on:
   workflow_dispatch:
+    inputs:
+      operation:
+        description: "Terraform operation"
+        required: true
+        type: choice
+        default: plan
+        options:
+          - plan
+          - apply
 
 permissions:
   id-token: write
   contents: read
 
+concurrency:
+  group: terraform-deployment-lab
+  cancel-in-progress: false
+
 jobs:
-  terraform-plan:
-    name: Terraform Plan
+  terraform-deployment:
+    name: Terraform ${{ inputs.operation }}
     runs-on: ubuntu-latest
 
     defaults:
@@ -47,4 +60,8 @@ jobs:
         run: terraform validate
 
       - name: Terraform Plan
-        run: terraform plan -input=false -no-color
+        run: terraform plan -input=false -no-color -out=tfplan
+
+      - name: Terraform Apply
+        if: inputs.operation == 'apply'
+        run: terraform apply -input=false -no-color -auto-approve tfplan
