@@ -1108,12 +1108,399 @@ For production environments:
 
 ---
 
+## Lesson 6 – GitHub Actions Environments & Manual Approval Gates
+
+### Objective
+
+Separate Terraform planning from infrastructure deployment and require a human approval before applying changes to the Azure development environment.
+
+The lesson builds on Lesson 5's Azure OIDC authentication and Azure Blob Storage remote state. The final workflow uses two GitHub Actions jobs, transfers an immutable saved Terraform plan as a short-lived artifact, and uses the GitHub Environment `dev` to gate the apply job.
+
+Learning outcomes:
+
+- Distinguish `workflow_dispatch` inputs, job conditions, job dependencies, and environment protection rules.
+- Understand why separate jobs need an artifact to transfer a saved Terraform plan.
+- Configure a required reviewer for the `dev` environment and restrict deployment branches to `main`.
+- Understand how the GitHub OIDC token subject changes for a job using an environment.
+- Verify that the plan-only and plan-plus-apply paths behave differently.
+- Troubleshoot a failed Azure login caused by an incorrect subscription ID.
+
+### Architecture and Execution Flow
+
+```text
+Developer manually starts workflow on main
+                 |
+                 v
+       workflow_dispatch input
+         operation: plan/apply
+                 |
+                 v
+      terraform-plan job
+      - checkout repository
+      - configure Terraform
+      - authenticate to Azure via OIDC
+      - terraform init / fmt / validate
+      - terraform plan -out=tfplan
+                 |
+           operation == apply?
+           /             \
+         no              yes
+         |                |
+      finish       upload tfplan artifact
+                          |
+                          v
+                terraform-apply job
+                needs: terraform-plan
+                environment: dev
+                          |
+                          v
+                GitHub required reviewer
+                manual approval
+                          |
+                          v
+                separate Ubuntu runner
+                - checkout / setup
+                - Azure OIDC login
+                - terraform init
+                - download tfplan
+                - terraform apply tfplan
+                          |
+                          v
+                  Azure resources
+                Azure Blob remote state
+```
+
+**Important:** The environment approval occurs *before the apply job starts*. GitHub holds the job pending until the environment protection rule is satisfied. The plan job is not environment-gated in this lab.
+
+### GitHub Environment Configuration
+
+In the repository, navigate to **Settings → Environments → New environment** and create `dev`.
+
+For this lab, configure:
+
+| Setting | Lab value | Purpose |
+| --- | --- | --- |
+| Environment name | `dev` | Identifies the deployment target and protection boundary |
+| Required reviewer | Repository owner (`Tomislav89`) | Requires an explicit approval before the apply job begins |
+| Prevent self-review | Disabled for this learning lab | Allows the workflow initiator to approve their own deployment |
+| Deployment branches/tags | Selected branches: `main` | Limits which Git refs may deploy to this environment |
+| Admin bypass | Enabled for the lab | Allows permitted administrators to bypass protection if necessary |
+
+These settings are appropriate for testing the mechanism, **not** for a production separation-of-duties model. Production should normally prevent self-approval, limit bypass privileges, and use independent reviewers. Environment protection availability depends on repository visibility and GitHub plan; in this lab the reviewer gate was verified in a real workflow run.
+
+Adding `environment: dev` to a job is necessary to associate it with this environment, but **does not by itself guarantee approval**. Approval comes from the environment's configured protection rules and their availability for the repository.
+
+### OIDC Federation for Branch and Environment Jobs
+
+GitHub Actions requests a short-lived OIDC token from GitHub. Microsoft Entra ID validates its issuer, audience, and subject against a federated identity credential on the Azure App Registration. Azure RBAC then determines what the authenticated service principal is authorized to do.
+
+App Registration: `github-actions-terraform-oidc`.
+
+Two federated credentials are configured:
+
+| Credential | Subject scope | Used by |
+| --- | --- | --- |
+| `github-main-oidc` | GitHub repository, `refs/heads/main` | `terraform-plan` (no environment) |
+| `github-dev-oidc` | GitHub repository, `environment:dev` | `terraform-apply` (environment `dev`) |
+
+The issuer is `https://token.actions.githubusercontent.com`, and the audience is `api://AzureADTokenExchange`.
+
+The full GitHub OIDC subject is generated from the repository's GitHub identity and context. In this lab the observed subjects were:
+
+```text
+repo:Tomislav89@15340421/azure-learning-labs@1325714503:ref:refs/heads/main
+repo:Tomislav89@15340421/azure-learning-labs@1325714503:environment:dev
+```
+
+These strings must match the actual federated credential configuration in Entra ID. Do not assume a branch-based credential also matches an environment-based token. The credential *names* are descriptive labels; the YAML does not reference them. Azure matches token claims to the configured federated credential.
+
+Both jobs need `id-token: write` because each performs its own OIDC login on a separate runner. This permission allows requesting a GitHub OIDC token; it does **not** itself grant Azure permissions.
+
+For this lab the service principal has Contributor on `rg-github-oidc-lab` and Storage Blob Data Contributor on the `tfstate` container in `sttfstatezivkovic26` (resource group `rg-terraform-state`). The state key is `github-actions-deployment.tfstate`.
+
+### Complete GitHub Actions Workflow
+
+Source file: `.github/workflows/terraform-deploy.yml`.
+
+The following is a snapshot of the workflow at the end of Lesson 6. The actual repository file is the authoritative version if the workflow is changed later.
+
+```yaml
+name: Terraform Azure Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: "Terraform operation"
+        required: true
+        type: choice
+        default: plan
+        options:
+          - plan
+          - apply
+
+permissions:
+  contents: read
+
+concurrency:
+  group: terraform-deployment-lab
+  cancel-in-progress: false
+
+jobs:
+  terraform-plan:
+    name: Terraform Plan
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+
+    defaults:
+      run:
+        working-directory: github-actions/terraform-deployment-lab
+
+    env:
+      ARM_USE_OIDC: "true"
+      ARM_USE_AZUREAD: "true"
+      ARM_CLIENT_ID: "e0a670f6-2928-49a3-8532-aff461e897b8"
+      ARM_TENANT_ID: "40553eb6-3bdc-49f5-80a3-0b69c3a8cad3"
+      ARM_SUBSCRIPTION_ID: "86d4c7aa-bdab-457c-a0f5-f8cfb043e58d"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Azure Login via OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.ARM_CLIENT_ID }}
+          tenant-id: ${{ env.ARM_TENANT_ID }}
+          subscription-id: ${{ env.ARM_SUBSCRIPTION_ID }}
+
+      - name: Terraform Init
+        run: terraform init -input=false
+
+      - name: Terraform Format Check
+        run: terraform fmt -check
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan
+        run: terraform plan -input=false -no-color -out=tfplan
+
+      - name: Upload Terraform Plan
+        if: inputs.operation == 'apply'
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan
+          path: github-actions/terraform-deployment-lab/tfplan
+          retention-days: 1
+          if-no-files-found: error
+
+  terraform-apply:
+    name: Terraform Apply
+    if: inputs.operation == 'apply'
+    needs: terraform-plan
+    runs-on: ubuntu-latest
+
+    environment:
+      name: dev
+
+    permissions:
+      contents: read
+      id-token: write
+
+    defaults:
+      run:
+        working-directory: github-actions/terraform-deployment-lab
+
+    env:
+      ARM_USE_OIDC: "true"
+      ARM_USE_AZUREAD: "true"
+      ARM_CLIENT_ID: "e0a670f6-2928-49a3-8532-aff461e897b8"
+      ARM_TENANT_ID: "40553eb6-3bdc-49f5-80a3-0b69c3a8cad3"
+      ARM_SUBSCRIPTION_ID: "86d4c7aa-bdab-457c-a0f5-f8cfb043e58d"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Azure Login via OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.ARM_CLIENT_ID }}
+          tenant-id: ${{ env.ARM_TENANT_ID }}
+          subscription-id: ${{ env.ARM_SUBSCRIPTION_ID }}
+
+      - name: Terraform Init
+        run: terraform init -input=false
+
+      - name: Download Terraform Plan
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan
+          path: github-actions/terraform-deployment-lab
+
+      - name: Terraform Apply
+        run: terraform apply -input=false -no-color tfplan
+```
+
+### Understanding the Workflow
+
+**Manual operation selection:** `workflow_dispatch` provides an `operation` choice (`plan` or `apply`), with `plan` as the default. A manual run is launched from the GitHub Actions UI against the chosen branch and commit.
+
+**Top-level permissions:** `contents: read` is the conservative default. Each job explicitly adds `id-token: write` because Azure OIDC authentication requires it.
+
+**Concurrency:** `group: terraform-deployment-lab` prevents overlapping runs in the same group. `cancel-in-progress: false` avoids cancelling a deployment already underway. GitHub concurrency is not a substitute for Terraform backend state locking.
+
+**Working directory:** Both jobs use `defaults.run.working-directory: github-actions/terraform-deployment-lab`. This affects shell `run:` steps; action inputs such as artifact `path:` are interpreted relative to the GitHub workspace, so the full repository-relative path is specified for upload and download.
+
+**Azure authentication:** `azure/login@v2` uses the client, tenant, and subscription identifiers supplied from job environment variables. `ARM_USE_OIDC=true` and `ARM_USE_AZUREAD=true` support Terraform's OIDC and Azure AD authentication, including remote backend access. No long-lived Azure client secret is stored in the workflow.
+
+**Plan validation:** `terraform init -input=false` initializes providers and the remote backend; `terraform fmt -check` checks formatting; `terraform validate` validates the configuration; `terraform plan -input=false -no-color -out=tfplan` saves a binary execution plan.
+
+**Conditional upload:** `if: inputs.operation == 'apply'` uploads the saved `tfplan` only for an apply operation. The artifact is named `terraform-plan`; `retention-days: 1` minimizes how long it is retained; `if-no-files-found: error` fails the step if the expected plan is missing.
+
+**Job dependency and condition:** The apply job uses both `needs: terraform-plan` and `if: inputs.operation == 'apply'`. The dependency ensures the plan job succeeds first; the condition ensures a plan-only run skips the apply job.
+
+**Environment approval:** `environment: name: dev` associates the apply job with GitHub's protected `dev` environment. With the configured required reviewer, GitHub pauses execution until approval. The approval controls job start, not an individual Terraform command inside an already-running job.
+
+**Separate runner:** Jobs do not share a working directory or filesystem. The apply job must check out the repository, install Terraform, log in to Azure, and initialize the backend again.
+
+**Download path:** `actions/download-artifact@v4` downloads artifact `terraform-plan` into the directory `github-actions/terraform-deployment-lab`. Because the artifact contains a file named `tfplan`, the result is `github-actions/terraform-deployment-lab/tfplan`. The `path` input identifies the **destination directory**, not the filename to create.
+
+**Apply saved plan:** `terraform apply -input=false -no-color tfplan` applies the exact saved plan produced by the successful plan job, rather than recalculating a fresh plan in the apply job. The plan is bound to the state and provider/configuration context in which it was generated; it may fail if state or external conditions have changed in the meantime.
+
+### Plan Artifacts: Security and Lifecycle
+
+The saved plan file is binary Terraform output, not a human-readable approval report. It may contain sensitive configuration or values. Limit artifact access and retention, and do not publish plan artifacts openly.
+
+```text
+Plan runner:
+  github-actions/terraform-deployment-lab/tfplan
+           |
+           | actions/upload-artifact@v4
+           v
+  GitHub artifact: terraform-plan
+           |
+           | actions/download-artifact@v4
+           v
+Apply runner:
+  github-actions/terraform-deployment-lab/tfplan
+```
+
+In a production workflow, reviewers should be able to inspect an appropriately redacted human-readable plan summary before approval. A binary artifact alone does not provide that review experience. Protect the workflow and Terraform files from unauthorized changes and consider artifact integrity and access controls.
+
+### Manual Testing and Expected Behavior
+
+**Test 1 – Plan only**
+
+1. Open **Actions → Terraform Azure Deployment → Run workflow**.
+2. Select branch `main` and `operation: plan`.
+3. Start a **new** run.
+4. Verify `Terraform Plan` succeeds and `Terraform Apply` is skipped.
+5. Confirm the workflow does not request an environment approval for this path.
+
+**Test 2 – Apply with approval**
+
+1. Start a **new** run on branch `main` with `operation: apply`.
+2. Verify the `Terraform Plan` job completes successfully and uploads the artifact.
+3. Verify GitHub shows a pending deployment / **Review deployments** prompt for `dev`.
+4. Review the deployment and click **Approve and deploy**.
+5. Verify `Terraform Apply` starts only after approval and completes successfully.
+6. Open the `Terraform Apply` step and inspect the final result.
+
+The successful final test used commit `0d27ba5` and produced:
+
+```text
+Run terraform apply -input=false -no-color tfplan
+Acquiring state lock. This may take a few moments...
+Releasing state lock. This may take a few moments...
+Apply complete! Resources: 0 added, 0 changed, 0 destroyed.
+```
+
+This verifies that the infrastructure already matched the desired Terraform configuration: no new resources, changes, or deletions were needed. It also shows Terraform acquired and released the backend state lock. The user confirmed the manual reviewer approval was required before the apply job ran.
+
+Successful run: https://github.com/Tomislav89/azure-learning-labs/actions/runs/41436303365/job/125250973366
+
+### Troubleshooting: Incorrect Azure Subscription ID
+
+During the first apply test, `Terraform Plan` succeeded but `Terraform Apply` failed in `Azure Login via OIDC`. The apply job contained a typo in `ARM_SUBSCRIPTION_ID`; the plan job contained the correct value.
+
+The error reported that the subscription did not exist in `AzureCloud`. This did **not** establish that the subscription was missing or that the service principal lacked RBAC. Comparing the workflow's two job environments revealed the mismatch.
+
+The fix was to set both job values to the same correct Azure subscription ID. The following commands were used to verify the change:
+
+```bash
+grep -n 'ARM_SUBSCRIPTION_ID:' .github/workflows/terraform-deploy.yml
+git diff --check
+```
+
+Expected outcome: two matching `ARM_SUBSCRIPTION_ID` entries and no whitespace errors from `git diff --check`.
+
+Commit and push workflow changes using the normal repository process:
+
+```bash
+git status
+git add .github/workflows/terraform-deploy.yml
+git commit -m "Fix Azure subscription ID in Terraform Apply job"
+git pull --rebase origin main
+git push origin main
+```
+
+The correction was committed as `0d27ba5` and the local `main` and `origin/main` were confirmed synchronized:
+
+```bash
+git status -sb
+git log -1 --oneline
+git rev-parse origin/main
+```
+
+**Critical troubleshooting lesson:** A GitHub Actions **Re-run all jobs** operation reruns the original run's commit. It does not pick up YAML fixes from a newer commit. After changing the workflow, start a **new** `workflow_dispatch` run on `main` and verify its commit SHA before diagnosing further.
+
+### Security and Production Considerations
+
+This exercise validates an approval gate, but the design is a learning lab rather than a fully hardened production deployment system.
+
+- Disable self-approval and use independent reviewers for production environments.
+- Restrict deployment branches and protect `main` with appropriate branch/ruleset policies.
+- Minimize admin bypass permissions and record approval decisions.
+- Use distinct Azure identities and least-privilege RBAC for planning and applying where practical.
+- Understand that the plan job currently has Azure Contributor permissions; the GitHub approval gate is **not** an Azure RBAC security boundary.
+- Protect remote Terraform state and restrict access to plan artifacts; both can contain sensitive values.
+- Add a redacted plan summary to pull request or approval workflows so reviewers can evaluate proposed changes.
+- Consider pinning third-party GitHub Actions to immutable commit SHAs.
+- Ensure the plan artifact corresponds to the expected commit and workflow run; avoid untrusted artifact substitution.
+- Keep state locking, concurrency controls, and deployment audit trails.
+- Never commit credentials, client secrets, Terraform state files, or sensitive `.tfvars` files.
+- Define recovery, rollback, and destroy procedures before using this pattern for critical infrastructure.
+
+### Key Takeaways
+
+- `terraform-plan` and `terraform-apply` are independent jobs with separate runners.
+- `needs:` enforces ordering; `if:` controls whether the apply job runs.
+- A saved `tfplan` is transferred with GitHub artifact upload and download actions.
+- GitHub Environment `dev` can require approval before the apply job starts.
+- An environment-scoped OIDC token has a different subject from a branch-scoped token.
+- Azure OIDC authentication and Azure RBAC authorization are distinct concerns.
+- `terraform apply tfplan` applies the saved plan without recalculating it.
+- The final run verified manual approval, successful Azure login, state locking, and zero infrastructure drift.
+- After changing workflow YAML, start a new run from the updated commit rather than rerunning an old run.
+
+---
+
 ## Future Labs
 
 The following topics are planned but are not yet implemented
 in the current deployment workflow:
 
-- Protected GitHub Environments and manual approval gates
 - Pull request plan reviews and plan artifacts
 - Secure handling of credentials and configuration
 - Terraform destroy and infrastructure cleanup
