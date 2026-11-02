@@ -13,7 +13,6 @@ on:
           - apply
 
 permissions:
-  id-token: write
   contents: read
 
 concurrency:
@@ -21,9 +20,13 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  terraform-deployment:
-    name: Terraform ${{ inputs.operation }}
+  terraform-plan:
+    name: Terraform Plan
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
 
     defaults:
       run:
@@ -62,6 +65,61 @@ jobs:
       - name: Terraform Plan
         run: terraform plan -input=false -no-color -out=tfplan
 
-      - name: Terraform Apply
+      - name: Upload Terraform Plan
         if: inputs.operation == 'apply'
-        run: terraform apply -input=false -no-color -auto-approve tfplan
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan
+          path: github-actions/terraform-deployment-lab/tfplan
+          retention-days: 1
+          if-no-files-found: error
+
+  terraform-apply:
+    name: Terraform Apply
+    if: inputs.operation == 'apply'
+    needs: terraform-plan
+    runs-on: ubuntu-latest
+
+    environment:
+      name: dev
+
+    permissions:
+      contents: read
+      id-token: write
+
+    defaults:
+      run:
+        working-directory: github-actions/terraform-deployment-lab
+
+    env:
+      ARM_USE_OIDC: "true"
+      ARM_USE_AZUREAD: "true"
+      ARM_CLIENT_ID: "e0a670f6-2928-49a3-8532-aff461e897b8"
+      ARM_TENANT_ID: "40553eb6-3bdc-49f5-80a3-0b69c3a8cad3"
+      ARM_SUBSCRIPTION_ID: "86d4c7aa-bdab-457c-a0f5-80a3-0b69c3a8cad3"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Azure Login via OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.ARM_CLIENT_ID }}
+          tenant-id: ${{ env.ARM_TENANT_ID }}
+          subscription-id: ${{ env.ARM_SUBSCRIPTION_ID }}
+
+      - name: Terraform Init
+        run: terraform init -input=false
+
+      - name: Download Terraform Plan
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan
+          path: github-actions/terraform-deployment-lab
+
+      - name: Terraform Apply
+        run: terraform apply -input=false -no-color tfplan
