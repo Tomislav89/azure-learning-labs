@@ -1496,12 +1496,672 @@ This exercise validates an approval gate, but the design is a learning lab rathe
 
 ---
 
+## Lesson 7 – Terraform Pull Request Validation and Plan
+
+### Goal
+
+Automatically validate Terraform code and generate a Terraform Plan
+when a Pull Request targets the `main` branch.
+
+This lesson extends our existing GitHub Actions deployment lab with
+a separate Pull Request pipeline.
+
+The key architectural principle is separation of responsibilities:
+
+- Pull Request pipeline: validate and review proposed infrastructure changes.
+- Deployment pipeline: execute approved infrastructure changes.
+
+The PR pipeline does not execute `terraform apply`.
+
+### Architecture
+
+```text
+Developer creates feature branch
+              |
+              v
+Developer opens Pull Request to main
+              |
+              v
+GitHub Actions: terraform-pr.yml
+              |
+              v
+Terraform Format Check
+              |
+              v
+GitHub OIDC Token
+              |
+              v
+Microsoft Entra ID
+              |
+              v
+PR Service Principal
+              |
+              v
+Azure Login
+              |
+              v
+Terraform Init (Azure Remote Backend)
+              |
+              v
+Terraform Validate
+              |
+              v
+Terraform Plan
+              |
+              v
+Review results before merge
+```
+
+### Part 1 – Initial PR Validation
+
+We first created:
+
+`.github/workflows/terraform-pr.yml`
+
+The initial workflow executed:
+
+```bash
+terraform fmt -check -recursive
+terraform init -backend=false -input=false
+terraform validate
+```
+
+At this stage, no Azure authentication was required.
+
+`terraform fmt -check -recursive` verifies Terraform formatting
+without modifying the files.
+
+`terraform init -backend=false` initializes Terraform without
+connecting to the configured Azure remote backend.
+
+`terraform validate` verifies the syntax and internal consistency
+of the Terraform configuration.
+
+This initial pipeline was tested through a Pull Request and
+successfully merged into `main`.
+
+### Part 2 – Why Terraform Plan Needs Azure Access
+
+Unlike basic validation, our Terraform Plan uses real Azure
+infrastructure and an existing Terraform remote state.
+
+Terraform needs to:
+
+1. Authenticate to Azure.
+2. Access the configured remote state.
+3. Read relevant Azure resource information.
+4. Calculate the proposed infrastructure changes.
+
+Therefore, we extended the workflow with Azure OIDC authentication.
+
+### Part 3 – Separate App Registration for PR Validation
+
+We created a new Microsoft Entra App Registration:
+
+`github-actions-terraform-pr-oidc`
+
+Application (Client) ID:
+
+`d3ebe1d4-46cd-49b4-961c-877c9533561b`
+
+App Registration Object ID:
+
+`88bf4aa9-dac7-4e52-882c-752cabf26493`
+
+Enterprise Application / Service Principal Object ID:
+
+`739cdef8-a47a-4650-be24-913c906c6799`
+
+These identifiers have different purposes:
+
+- Client ID identifies the application during authentication.
+- App Registration Object ID identifies the application object.
+- Service Principal Object ID identifies the enterprise application
+  instance to which Azure RBAC permissions are assigned.
+
+The App Registration defines the application identity.
+
+The Service Principal represents that identity in the Azure tenant
+and receives Azure RBAC role assignments.
+
+We deliberately created a separate identity rather than reusing
+the deployment Service Principal.
+
+This follows the Least Privilege principle.
+
+### Part 4 – Federated Credential for Pull Requests
+
+In the App Registration, we created a Federated Credential
+for GitHub Actions.
+
+Configuration:
+
+```text
+Issuer:
+https://token.actions.githubusercontent.com
+
+Audience:
+api://AzureADTokenExchange
+
+Entity type:
+Pull request
+
+Credential name:
+github-pr-oidc
+```
+
+The federated credential allows Microsoft Entra ID to trust
+matching GitHub OIDC tokens.
+
+The token contains claims describing the GitHub repository
+and the workflow execution context.
+
+Microsoft Entra ID verifies these claims against the configured
+Federated Credential.
+
+If validation succeeds, GitHub Actions can obtain an Azure
+access token without storing an Azure Client Secret.
+
+Important distinction:
+
+- Authentication answers: Who is this workflow?
+- Authorization answers: What is this identity allowed to do?
+
+Federated Credentials handle the trust relationship.
+
+Azure RBAC controls permissions on Azure resources.
+
+### Part 5 – Azure RBAC Permissions
+
+We assigned two Azure RBAC roles to the new PR Service Principal.
+
+Role 1:
+
+```text
+Role:
+Reader
+
+Scope:
+rg-github-oidc-lab
+```
+
+This allows the identity to read Azure resource configuration
+in the deployment Resource Group.
+
+Role 2:
+
+```text
+Role:
+Storage Blob Data Reader
+
+Scope:
+Storage Account: sttfstatezivkovic26
+Container: tfstate
+```
+
+This allows the identity to read blobs in the Terraform
+state container.
+
+The identity does not have Contributor permissions on the
+deployment Resource Group or Storage Blob Data Contributor
+permissions on the state container.
+
+We verified the assignments with Azure CLI:
+
+```bash
+az role assignment list   --assignee 739cdef8-a47a-4650-be24-913c906c6799   --all   --query "[].{role:roleDefinitionName,scope:scope}"   -o table
+```
+
+The output confirmed:
+
+```text
+Reader
+Storage Blob Data Reader
+```
+
+Security note:
+
+Terraform state may contain sensitive information.
+
+Storage Blob Data Reader provides read access to the permitted
+blobs, so this role must not be treated as harmless.
+
+For production, consider separate state containers, stricter
+access boundaries, and trusted PR execution paths.
+
+### Part 6 – GitHub Actions Permissions
+
+Our workflow contains:
+
+```yaml
+permissions:
+  contents: read
+```
+
+The job also declares:
+
+```yaml
+permissions:
+  contents: read
+  id-token: write
+```
+
+`contents: read` allows the workflow to read repository contents,
+including the Terraform configuration.
+
+`id-token: write` allows the job to request a GitHub OIDC token.
+
+It does not grant permission to modify Azure resources.
+
+Azure resource permissions come from Azure RBAC assignments
+on the authenticated Service Principal.
+
+### Part 7 – Terraform Backend Configuration
+
+File:
+
+`github-actions/terraform-deployment-lab/backend.tf`
+
+Configuration:
+
+```hcl
+terraform {
+  backend "azurerm" {
+    resource_group_name  = "rg-terraform-state"
+    storage_account_name = "sttfstatezivkovic26"
+    container_name       = "tfstate"
+    key                  = "github-actions-deployment.tfstate"
+
+    use_azuread_auth = true
+    use_oidc         = true
+  }
+}
+```
+
+`use_azuread_auth = true` enables Microsoft Entra authentication
+for Azure Blob Storage data access.
+
+`use_oidc = true` enables OIDC authentication for the backend.
+
+The state file is stored remotely in Azure Storage.
+
+Terraform state describes the infrastructure Terraform currently
+manages, including resource identities and attributes.
+
+The backend and the AzureRM provider have separate authentication
+requirements, even though both use the same Azure identity
+in this lab.
+
+### Part 8 – GitHub Actions Workflow
+
+File:
+
+`.github/workflows/terraform-pr.yml`
+
+```yaml
+name: Terraform Pull Request Validation
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "github-actions/terraform-deployment-lab/**"
+      - ".github/workflows/terraform-pr.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  terraform-pr-validation:
+    name: Terraform PR Validation
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.head.repo.full_name == github.repository
+
+    permissions:
+      contents: read
+      id-token: write
+
+    defaults:
+      run:
+        working-directory: github-actions/terraform-deployment-lab
+
+    env:
+      ARM_USE_OIDC: "true"
+      ARM_USE_AZUREAD: "true"
+      ARM_CLIENT_ID: "d3ebe1d4-46cd-49b4-961c-877c9533561b"
+      ARM_TENANT_ID: "40553eb6-3bdc-49f5-80a3-0b69c3a8cad3"
+      ARM_SUBSCRIPTION_ID: "86d4c7aa-bdab-457c-a0f5-f8cfb043e58d"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+
+      - name: Azure Login via OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.ARM_CLIENT_ID }}
+          tenant-id: ${{ env.ARM_TENANT_ID }}
+          subscription-id: ${{ env.ARM_SUBSCRIPTION_ID }}
+
+      - name: Terraform Init
+        run: terraform init -input=false
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan
+        run: terraform plan -input=false -no-color -lock=false -refresh=false
+```
+
+### Part 9 – Workflow Trigger and Path Filtering
+
+The workflow runs when a Pull Request targets `main` and
+contains changes matching the configured paths.
+
+```yaml
+on:
+  pull_request:
+    branches:
+      - main
+```
+
+This specifies the destination branch of the Pull Request.
+
+```yaml
+paths:
+  - "github-actions/terraform-deployment-lab/**"
+  - ".github/workflows/terraform-pr.yml"
+```
+
+This limits execution to relevant Terraform project changes
+or modifications to the PR workflow itself.
+
+A PR changing unrelated files may not trigger this workflow.
+
+When using required GitHub status checks, path filtering
+must be designed carefully because skipped workflows can
+leave required checks pending.
+
+### Part 10 – Restricting Fork Pull Requests
+
+The job contains:
+
+```yaml
+if: github.event.pull_request.head.repo.full_name == github.repository
+```
+
+This checks whether the source repository of the Pull Request
+is the same repository running the workflow.
+
+Pull Requests from external forks will not execute this job.
+
+This is an additional safety measure for our controlled lab.
+
+However, this condition alone does not protect against
+untrusted changes made on branches inside the same repository.
+
+A production design should enforce repository permissions,
+branch protection, code review, and trusted workflow boundaries.
+
+### Part 11 – Azure Login via OIDC
+
+```yaml
+- name: Azure Login via OIDC
+  uses: azure/login@v2
+  with:
+    client-id: ${{ env.ARM_CLIENT_ID }}
+    tenant-id: ${{ env.ARM_TENANT_ID }}
+    subscription-id: ${{ env.ARM_SUBSCRIPTION_ID }}
+```
+
+The Azure Login action requests a GitHub OIDC token and
+exchanges it with Microsoft Entra ID.
+
+The App Registration's Federated Credential determines
+whether the GitHub token is trusted.
+
+If authentication succeeds, the workflow receives an Azure
+access token for the configured identity.
+
+No Client Secret is stored in the repository.
+
+### Part 12 – Terraform Initialization and Validation
+
+```bash
+terraform init -input=false
+terraform validate
+```
+
+Unlike the initial validation-only workflow, this initialization
+uses the configured Azure remote backend.
+
+`-input=false` disables interactive prompts, which is important
+for unattended CI pipelines.
+
+`terraform validate` checks Terraform configuration validity.
+
+Successful initialization also verifies that the configured
+identity can access the backend in this lab.
+
+### Part 13 – Terraform Plan
+
+Our final PR pipeline executes:
+
+```bash
+terraform plan -input=false -no-color -lock=false -refresh=false
+```
+
+Parameter explanations:
+
+- `-input=false`: disables interactive input.
+- `-no-color`: removes terminal color escape sequences from CI logs.
+- `-lock=false`: disables Terraform state locking.
+- `-refresh=false`: skips refreshing managed resource state from
+  the remote infrastructure before planning.
+
+Why did we use these options?
+
+The PR Service Principal has Storage Blob Data Reader permissions.
+
+Normal Azure Blob state locking requires operations that
+a read-only blob identity cannot perform.
+
+Disabling state locking allows us to test this restricted
+read-only workflow.
+
+Disabling refresh reduces reliance on reading live managed
+resource state during this controlled lab.
+
+Important limitations:
+
+- The plan may not detect infrastructure drift.
+- The state can change concurrently while the plan runs.
+- The plan may become outdated before deployment.
+- A plan can still expose sensitive Terraform information.
+- A plan is not a security approval or a substitute for review.
+
+These settings are suitable only for this specific
+learning experiment, not a production deployment design.
+
+### Part 14 – Git Workflow and Pull Request Test
+
+We created the feature branch:
+
+```bash
+git checkout -b feature/terraform-pr-plan
+```
+
+After modifying the workflow:
+
+```bash
+git status -sb
+git diff --check
+
+git add .github/workflows/terraform-pr.yml
+
+git commit -m "Add Azure OIDC authentication and Terraform plan to PR workflow"
+
+git push -u origin feature/terraform-pr-plan
+```
+
+We opened a Pull Request targeting `main`.
+
+GitHub Actions automatically started the Terraform PR
+Validation workflow.
+
+The workflow completed successfully, including:
+
+- Terraform Format Check
+- Azure Login via OIDC
+- Terraform Init
+- Terraform Validate
+- Terraform Plan
+
+The successful run demonstrated that the configured
+read-only Azure identity was sufficient for this specific
+Terraform Plan execution.
+
+After verifying the successful checks, we merged the PR.
+
+We synchronized the local repository:
+
+```bash
+git checkout main
+git pull --rebase origin main
+git status -sb
+```
+
+The merge updated `main` to commit:
+
+`3645384`
+
+### Part 15 – PR Pipeline vs Deployment Pipeline
+
+| Capability | PR Pipeline | Deployment Pipeline |
+|---|---|---|
+| Trigger | Pull Request | Manual workflow_dispatch |
+| Purpose | Validation and proposed changes | Deployment |
+| Azure identity | PR Service Principal | Deployment Service Principal |
+| Resource permissions | Reader | Contributor at lab Resource Group |
+| State permissions | Blob Data Reader | Blob Data Contributor |
+| Terraform validate | Yes | Separate workflow design |
+| Terraform plan | Yes | Yes |
+| Terraform apply | No | Yes, after approval |
+| Manual approval | Not configured | GitHub Environment dev |
+| State locking | Disabled in PR lab | Enabled for deployment |
+
+The most important principle:
+
+PR pipelines should not automatically receive the same
+deployment privileges as production apply pipelines.
+
+### Part 16 – Troubleshooting
+
+#### Azure Login fails
+
+Check:
+
+- Client ID, Tenant ID, and Subscription ID.
+- `id-token: write` permission.
+- App Registration Federated Credential.
+- Pull Request subject configuration.
+- Repository and organization identifiers.
+
+A successful GitHub OIDC token request does not guarantee
+that Microsoft Entra ID will accept the token.
+
+#### Terraform Init fails with authorization errors
+
+Check:
+
+- Storage Account and container names.
+- Terraform backend key.
+- Storage Blob Data Reader assignment.
+- Scope of the RBAC assignment.
+- Whether the backend requires additional operations.
+
+Do not immediately grant Contributor permissions.
+
+Investigate the exact failed operation first.
+
+#### Terraform Plan fails
+
+Check:
+
+- Terraform configuration and provider settings.
+- Azure Reader permissions.
+- Backend access.
+- Whether state locking is enabled.
+- Whether refresh is enabled.
+- Any data sources requiring additional permissions.
+
+#### Workflow does not start
+
+Check:
+
+- The PR targets `main`.
+- At least one changed file matches the `paths` filter.
+- The workflow YAML is valid.
+- The PR originates from the expected repository.
+
+#### PR job is skipped
+
+The repository restriction may be responsible:
+
+```yaml
+if: github.event.pull_request.head.repo.full_name == github.repository
+```
+
+Fork-based PRs are intentionally skipped by this job.
+
+### Part 17 – Production Improvements
+
+For a real production CI/CD environment:
+
+1. Use trusted workflow execution and protected branches.
+2. Prevent untrusted PR code from obtaining privileged cloud access.
+3. Use dedicated identities and narrowly scoped Azure permissions.
+4. Keep Terraform state locking enabled where correctness matters.
+5. Refresh live infrastructure state when preparing deployment plans.
+6. Protect state files and plan artifacts as sensitive information.
+7. Pin third-party GitHub Actions to reviewed commit SHAs.
+8. Consider a sanitized plan summary for PR review.
+9. Require approval before infrastructure deployment.
+10. Ensure the approved plan corresponds to the expected commit.
+11. Configure CI concurrency and state ownership carefully.
+12. Maintain audit logs and recovery procedures.
+
+### Key Takeaways
+
+- Pull Requests can automatically trigger Terraform CI validation.
+- `terraform fmt` and `terraform validate` do not require Azure
+  authentication when backend initialization is disabled.
+- Terraform Plan with our Azure remote backend requires access
+  to Azure and the Terraform state.
+- GitHub OIDC removes the need for stored Azure Client Secrets.
+- App Registration and Service Principal Object IDs are different.
+- GitHub permissions and Azure RBAC control different capabilities.
+- A separate read-only PR identity reduces deployment privileges.
+- Storage Blob Data Reader can still access sensitive state data.
+- `-lock=false` and `-refresh=false` introduce important limitations.
+- Fork restrictions alone do not make a PR workflow fully trusted.
+- Our PR workflow successfully completed and was merged into `main`.
+
+---
+
 ## Future Labs
 
 The following topics are planned but are not yet implemented
 in the current deployment workflow:
 
-- Pull request plan reviews and plan artifacts
+- Publishing sanitized Terraform Plan summaries in Pull Requests
 - Secure handling of credentials and configuration
 - Terraform destroy and infrastructure cleanup
 - More advanced CI/CD practices for infrastructure projects
