@@ -1,0 +1,38 @@
+name: Terraform Pull Request Validation
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "github-actions/terraform-deployment-lab/**"
+      - ".github/workflows/terraform-pr.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  terraform-pr-validation:
+    name: Terraform PR Validation
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: github-actions/terraform-deployment-lab
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Init Without Backend
+        run: terraform init -backend=false -input=false
+
+      - name: Terraform Validate
+        run: terraform validate
+
