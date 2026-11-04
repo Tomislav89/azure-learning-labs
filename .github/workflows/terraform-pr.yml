@@ -28,9 +28,9 @@ jobs:
     env:
       ARM_USE_OIDC: "true"
       ARM_USE_AZUREAD: "true"
-      ARM_CLIENT_ID: "d3ebe1d4-46cd-49b4-961c-877c9533561b"
-      ARM_TENANT_ID: "40553eb6-3bdc-49f5-80a3-0b69c3a8cad3"
-      ARM_SUBSCRIPTION_ID: "86d4c7aa-bdab-457c-a0f5-f8cfb043e58d"
+      ARM_CLIENT_ID: ${{ vars.AZURE_PR_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
     steps:
       - name: Checkout repository
