@@ -2179,3 +2179,508 @@ in the current deployment workflow:
 
 - Terraform CLI documentation:
   https://developer.hashicorp.com/terraform/cli
+
+---
+
+# Lesson 8 – GitHub Actions Secrets, Variables & CI/CD Security
+
+## 1. Objective
+
+The goal of this lesson is to improve the configuration and security of our Terraform CI/CD pipelines by removing hardcoded Azure identifiers and using GitHub Actions Variables.
+
+In this lesson, we:
+
+- Configured Repository Variables and Environment Variables.
+- Used separate Azure Service Principals for PR validation and deployment.
+- Replaced hardcoded identifiers in both GitHub Actions workflows.
+- Continued using Azure OIDC without client secrets.
+- Preserved manual approval before Terraform Apply.
+- Successfully tested Terraform Plan and Apply.
+
+## 2. Repository Variables vs Environment Variables
+
+### Repository Variables
+
+Location:
+
+`Settings → Secrets and variables → Actions → Variables`
+
+Configured variables:
+
+| Variable | Purpose |
+|---|---|
+| AZURE_PR_CLIENT_ID | Client ID of the read-only PR Service Principal |
+| AZURE_DEPLOY_CLIENT_ID | Client ID of the deployment Service Principal |
+| AZURE_TENANT_ID | Microsoft Entra tenant identifier |
+| AZURE_SUBSCRIPTION_ID | Azure subscription identifier |
+
+Repository Variables are available to eligible jobs throughout the repository.
+
+Example from `terraform-pr.yml`:
+
+```yaml
+env:
+  ARM_USE_OIDC: "true"
+  ARM_USE_AZUREAD: "true"
+  ARM_CLIENT_ID: ${{ vars.AZURE_PR_CLIENT_ID }}
+  ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+```
+
+### Environment Variables
+
+Location:
+
+`Settings → Environments → dev → Environment variables`
+
+Configured variables:
+
+| Variable | Purpose |
+|---|---|
+| AZURE_DEPLOY_CLIENT_ID | Deployment Client ID for DEV |
+| AZURE_TENANT_ID | Tenant ID for DEV |
+| AZURE_SUBSCRIPTION_ID | Subscription ID for DEV |
+
+Environment Variables are available to jobs associated with that environment.
+
+Example:
+
+```yaml
+jobs:
+  terraform-apply:
+    runs-on: ubuntu-latest
+    environment:
+      name: dev
+```
+
+### Variable precedence
+
+If a Repository Variable and an Environment Variable share the same name, the Environment Variable takes precedence for a job associated with that environment.
+
+Our deployment workflow uses the same expression in both jobs:
+
+```yaml
+ARM_CLIENT_ID: ${{ vars.AZURE_DEPLOY_CLIENT_ID }}
+```
+
+- `terraform-plan` reads the Repository Variable.
+- `terraform-apply` reads the Environment Variable from `dev`.
+
+Important: Apply jobs can also read Repository Variables. We use Environment Variables for deployment-specific configuration, not because Repository Variables are inaccessible.
+
+## 3. Why We Use Two Azure Service Principals
+
+We created two Azure identities following the principle of least privilege.
+
+### PR Service Principal
+
+App Registration:
+
+`github-actions-terraform-pr-oidc`
+
+Client ID:
+
+`d3ebe1d4-46cd-49b4-961c-877c9533561b`
+
+Azure permissions:
+
+- Reader on `rg-github-oidc-lab`.
+- Storage Blob Data Reader on the Terraform state container.
+
+Used by:
+
+`.github/workflows/terraform-pr.yml`
+
+Purpose:
+
+Validate proposed Terraform changes without infrastructure modification permissions.
+
+### Deployment Service Principal
+
+App Registration:
+
+`github-actions-terraform-oidc`
+
+Client ID:
+
+`e0a670f6-2928-49a3-8532-aff461e897b8`
+
+Azure permissions:
+
+- Contributor on `rg-github-oidc-lab`.
+- Storage Blob Data Contributor for Terraform state.
+
+Used by:
+
+`.github/workflows/terraform-deploy.yml`
+
+Purpose:
+
+Run Terraform Plan and execute approved Terraform Apply operations.
+
+### Why not use one Service Principal?
+
+The PR workflow only needs read access.
+
+Giving it the same Contributor permissions as the deployment workflow would unnecessarily increase its privileges.
+
+Separate identities reduce the impact of compromised credentials or workflows.
+
+### Client ID vs Object ID
+
+- Application (Client) ID identifies the application during authentication.
+- Service Principal Object ID identifies its Enterprise Application object.
+- Azure RBAC determines what the identity is allowed to do.
+
+The Terraform variable `ARM_CLIENT_ID` expects the Application (Client) ID.
+
+## 4. Azure OIDC Authentication
+
+GitHub Actions authenticates to Azure using OpenID Connect (OIDC).
+
+Authentication flow:
+
+1. GitHub starts a workflow job.
+2. GitHub issues an OIDC token for the job.
+3. Microsoft Entra ID validates the token against configured federated credentials.
+4. Azure issues an access token to the Service Principal.
+5. Terraform accesses Azure using that identity and its RBAC permissions.
+
+Required GitHub permissions:
+
+```yaml
+permissions:
+  contents: read
+  id-token: write
+```
+
+Azure Login:
+
+```yaml
+- name: Azure Login via OIDC
+  uses: azure/login@v2
+  with:
+    client-id: ${{ env.ARM_CLIENT_ID }}
+    tenant-id: ${{ env.ARM_TENANT_ID }}
+    subscription-id: ${{ env.ARM_SUBSCRIPTION_ID }}
+```
+
+Terraform environment variables:
+
+```yaml
+ARM_USE_OIDC: "true"
+ARM_USE_AZUREAD: "true"
+ARM_CLIENT_ID: ${{ vars.AZURE_DEPLOY_CLIENT_ID }}
+ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+```
+
+OIDC avoids storing long-lived Azure client secrets in GitHub.
+
+Client ID, Tenant ID and Subscription ID are identifiers, not passwords.
+
+## 5. Updating the PR Workflow
+
+File:
+
+`.github/workflows/terraform-pr.yml`
+
+We replaced hardcoded Azure identifiers with Repository Variables.
+
+The workflow now uses:
+
+```yaml
+ARM_CLIENT_ID: ${{ vars.AZURE_PR_CLIENT_ID }}
+ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+```
+
+The PR pipeline performs:
+
+1. Checkout repository.
+2. Setup Terraform.
+3. Terraform Format Check.
+4. Azure Login via OIDC.
+5. Terraform Init.
+6. Terraform Validate.
+7. Terraform Plan.
+
+The PR pipeline does not declare `environment: dev`, so it uses Repository Variables.
+
+We tested the updated workflow through a Pull Request and confirmed that the validation pipeline passed.
+
+## 6. Updating the Deployment Workflow
+
+File:
+
+`.github/workflows/terraform-deploy.yml`
+
+We removed hardcoded Azure identifiers from both deployment jobs.
+
+Both jobs now contain:
+
+```yaml
+env:
+  ARM_USE_OIDC: "true"
+  ARM_USE_AZUREAD: "true"
+  ARM_CLIENT_ID: ${{ vars.AZURE_DEPLOY_CLIENT_ID }}
+  ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+```
+
+### Terraform Plan job
+
+The Plan job does not declare `environment: dev`.
+
+Therefore, it reads Repository Variables.
+
+Its main commands are:
+
+```bash
+terraform init -input=false
+terraform fmt -check
+terraform validate
+terraform plan -input=false -no-color -out=tfplan
+```
+
+When the workflow operation is `apply`, the generated plan is uploaded as a GitHub Actions artifact.
+
+### Terraform Apply job
+
+The Apply job declares:
+
+```yaml
+terraform-apply:
+  name: Terraform Apply
+  if: inputs.operation == 'apply'
+  needs: terraform-plan
+  runs-on: ubuntu-latest
+
+  environment:
+    name: dev
+```
+
+This associates the job with the GitHub Environment `dev`.
+
+The job can read the Environment Variables and is subject to its protection rules.
+
+After approval, the saved plan is downloaded and executed:
+
+```bash
+terraform apply -input=false -no-color tfplan
+```
+
+This executes the previously generated Terraform plan.
+
+## 7. Terraform Plan vs Terraform Apply
+
+The workflow uses `workflow_dispatch` with an operation input:
+
+```yaml
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: "Terraform operation"
+        required: true
+        type: choice
+        default: plan
+        options:
+          - plan
+          - apply
+```
+
+### Operation: plan
+
+Execution flow:
+
+```text
+Workflow Dispatch
+       |
+       v
+Terraform Plan
+       |
+       v
+Workflow Complete
+```
+
+No Apply job runs.
+
+No manual approval is required.
+
+### Operation: apply
+
+Execution flow:
+
+```text
+Workflow Dispatch
+       |
+       v
+Terraform Plan
+       |
+       v
+Upload tfplan Artifact
+       |
+       v
+GitHub Environment: dev
+       |
+       v
+Manual Approval
+       |
+       v
+Terraform Apply
+       |
+       v
+Workflow Complete
+```
+
+The Apply job uses:
+
+```yaml
+if: inputs.operation == 'apply'
+needs: terraform-plan
+```
+
+This ensures Apply only runs after a successful Plan and only when the user selects the apply operation.
+
+## 8. GitHub Environment Protection
+
+Our `dev` Environment is configured with:
+
+- Required reviewer approval.
+- Deployment branch restriction to `main`.
+- Environment-specific variables.
+
+The Apply job waits for manual approval before starting.
+
+In our lab, self-approval is permitted.
+
+In production, independent reviewers and stricter separation of duties are recommended.
+
+GitHub Environment rules control whether a deployment job may start.
+
+Azure RBAC controls which Azure operations the Service Principal may perform.
+
+These are separate security layers.
+
+## 9. Testing and Verification
+
+We successfully tested the updated deployment workflow.
+
+### Terraform Plan
+
+The Plan job passed using Repository Variables.
+
+Azure OIDC login, Terraform initialization, validation and planning completed successfully.
+
+### Manual Approval
+
+The Apply job waited for approval through the GitHub Environment `dev`.
+
+We reviewed and approved the deployment.
+
+### Terraform Apply
+
+After approval, the Apply job completed successfully.
+
+Terraform output:
+
+```text
+Apply complete! Resources: 0 added, 0 changed, 0 destroyed.
+```
+
+Explanation:
+
+- 0 added: No new resources were created.
+- 0 changed: No existing resources were modified.
+- 0 destroyed: No resources were deleted.
+
+The saved Terraform plan contained no infrastructure changes.
+
+### Git commit
+
+Deployment workflow update:
+
+```text
+5308384 – Use GitHub variables for Terraform deployment authentication
+```
+
+## 10. Security Best Practices
+
+### Principle of Least Privilege
+
+Use separate identities for validation and deployment.
+
+Assign only the Azure RBAC permissions required by each workflow.
+
+### OIDC Instead of Client Secrets
+
+Prefer federated identity credentials instead of long-lived client secrets.
+
+Restrict OIDC trust to the intended repository, branch, environment or event.
+
+### Protect Deployment Environments
+
+Use required reviewers and branch restrictions.
+
+Production environments should use independent approval.
+
+### Protect Terraform State
+
+Terraform state may contain sensitive values.
+
+Use secure remote storage, encryption, access restrictions and state locking.
+
+### Protect Terraform Plan Artifacts
+
+Saved Terraform plans can contain sensitive data.
+
+Limit artifact access and use short retention periods.
+
+Our deployment workflow uses a one-day artifact retention period.
+
+### Pull Request Workflow Security
+
+Pull Request workflows with cloud authentication require special care.
+
+Our lab limits credential-enabled PR validation to Pull Requests originating from the same repository.
+
+This alone is not sufficient protection for untrusted contributions, because a branch may also modify workflow files.
+
+Production pipelines should apply stronger controls to workflow changes and cloud authentication.
+
+### Terraform PR Plan Limitations
+
+Our PR workflow currently uses:
+
+```bash
+terraform plan -input=false -no-color -lock=false -refresh=false
+```
+
+Limitations:
+
+- `-lock=false` disables state locking.
+- `-refresh=false` skips refreshing Azure resource state.
+- Infrastructure drift may not be detected.
+
+These settings were chosen for our read-only validation lab and should not be considered a general production recommendation.
+
+### Pin Third-Party Actions
+
+For stronger supply-chain security, production workflows should pin external GitHub Actions to reviewed commit SHAs.
+
+## 11. Key Takeaways
+
+1. Repository Variables provide shared configuration across repository workflows.
+2. Environment Variables provide environment-specific configuration.
+3. Environment Variables override same-named Repository Variables for jobs associated with that environment.
+4. Jobs using Environments can still read Repository Variables.
+5. Terraform uses standard `ARM_*` variables for Azure authentication.
+6. Separate Service Principals provide different Azure permissions for PR validation and deployment.
+7. OIDC enables Azure authentication without stored client secrets.
+8. GitHub Environment approvals protect deployment execution.
+9. Terraform Apply can execute a previously saved Terraform plan.
+10. Secure CI/CD combines GitHub permissions, OIDC, Azure RBAC and protected environments.
+
+**Lesson 8 completed successfully.**
+
