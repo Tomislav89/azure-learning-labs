@@ -2684,3 +2684,778 @@ For stronger supply-chain security, production workflows should pin external Git
 
 **Lesson 8 completed successfully.**
 
+
+---
+
+# Lesson 9 – Terraform CI/CD Security & Production Hardening
+
+## 1. Objectives
+
+In this lesson, we hardened our Terraform GitHub Actions CI/CD pipeline using:
+
+- Least-privilege GitHub Actions permissions.
+- Commit SHA pinning for third-party Actions.
+- Azure Blob Storage security for Terraform remote state.
+- Azure RBAC and OIDC authentication.
+- GitHub Actions concurrency control.
+- GitHub Environment approval protection.
+- End-to-end Terraform Plan and Apply validation.
+
+The lab uses:
+
+- Repository: `Tomislav89/azure-learning-labs`
+- Terraform directory: `github-actions/terraform-deployment-lab`
+- Azure region: North Europe
+- Resource group for state: `rg-terraform-state`
+- Storage Account: `sttfstatezivkovic26`
+- Blob container: `tfstate`
+- State key: `github-actions-deployment.tfstate`
+
+## 2. GitHub Actions Workflow Permissions
+
+We use minimal GitHub Actions permissions.
+
+At the workflow level:
+
+```yaml
+permissions:
+  contents: read
+```
+
+For jobs requiring Azure OIDC authentication:
+
+```yaml
+permissions:
+  contents: read
+  id-token: write
+```
+
+Explanation:
+
+- `contents: read` allows reading repository content.
+- `id-token: write` allows requesting a GitHub OIDC token.
+- The OIDC token is exchanged for Azure authentication.
+- `id-token: write` does not automatically grant Azure permissions.
+- Azure RBAC determines which Azure resources the identity can access.
+
+The PR and deployment workflows use separate Azure identities.
+
+## 3. GitHub Actions SHA Pinning
+
+Originally, the workflows referenced Actions using major version tags:
+
+```yaml
+uses: actions/checkout@v4
+uses: hashicorp/setup-terraform@v3
+uses: azure/login@v2
+```
+
+Version tags can move to different commits.
+
+For stronger supply-chain security, we replaced version tags with full commit SHAs.
+
+Pinned Actions:
+
+| Action | Commit SHA |
+|---|---|
+| actions/checkout | `11d5960a326750d5838078e36cf38b85af677262` |
+| hashicorp/setup-terraform | `b9cd54a3c349d3f38e8881555d616ced269862dd` |
+| azure/login | `7184910d9eb2b1c5e48f7073824a90609bb9b6d6` |
+| actions/upload-artifact | `ea165f8d65b6e75b540449e92b4886f43607fa02` |
+| actions/download-artifact | `d3f86a106a0bac45b974a628896c90dbdf5c8093` |
+
+We replaced 11 Action references across two workflows.
+
+Example:
+
+```yaml
+- name: Checkout repository
+  uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+```
+
+Commands used to inspect Action references:
+
+```bash
+grep -n 'uses:' .github/workflows/terraform-pr.yml
+grep -n 'uses:' .github/workflows/terraform-deploy.yml
+```
+
+To inspect a tag in an official Action repository:
+
+```bash
+git ls-remote https://github.com/actions/checkout.git \
+  refs/tags/v4 refs/tags/v4^{}
+```
+
+For annotated Git tags, use the peeled commit SHA rather than the annotated tag object's SHA.
+
+Security considerations:
+
+- SHA pinning protects against a tag being moved.
+- It does not prove that the pinned Action is free of vulnerabilities.
+- Pinned versions must still be reviewed and updated.
+- Dependabot or a similar process can help maintain pinned Actions.
+
+Validation:
+
+- Terraform Plan succeeded.
+- Terraform Apply succeeded.
+- Upload and download artifact steps were exercised.
+- No infrastructure changes were required.
+
+Commit:
+
+```text
+1031fba security: pin GitHub Actions to commit SHAs
+```
+
+## 4. Terraform Remote State Security
+
+Terraform uses the AzureRM backend:
+
+```hcl
+terraform {
+  backend "azurerm" {
+    resource_group_name  = "rg-terraform-state"
+    storage_account_name = "sttfstatezivkovic26"
+    container_name       = "tfstate"
+    key                  = "github-actions-deployment.tfstate"
+
+    use_azuread_auth = true
+    use_oidc         = true
+  }
+}
+```
+
+The state is stored in Azure Blob Storage rather than in the Git repository.
+
+Important:
+
+- State files may contain sensitive infrastructure information.
+- Never commit `.tfstate` files to Git.
+- Protect the backend using Azure RBAC.
+- Protect against accidental deletion and overwriting.
+- Use state locking during operations that modify state.
+
+### 4.1 Inspect Storage Account Security
+
+```bash
+az storage account show \
+  --name sttfstatezivkovic26 \
+  --resource-group rg-terraform-state \
+  --query '{
+    httpsOnly:enableHttpsTrafficOnly,
+    minTls:minimumTlsVersion,
+    allowBlobPublicAccess:allowBlobPublicAccess,
+    sharedKeyAccess:allowSharedKeyAccess
+  }' \
+  -o json
+```
+
+Verified:
+
+- HTTPS-only access enabled.
+- Minimum TLS version: TLS 1.2.
+- Anonymous Blob access disabled.
+
+### 4.2 Enable Blob Soft Delete
+
+Blob Soft Delete allows recovery of deleted blobs during a retention period.
+
+Command:
+
+```bash
+az storage account blob-service-properties update \
+  --account-name sttfstatezivkovic26 \
+  --resource-group rg-terraform-state \
+  --enable-delete-retention true \
+  --delete-retention-days 7
+```
+
+Verification:
+
+```bash
+az storage account blob-service-properties show \
+  --account-name sttfstatezivkovic26 \
+  --resource-group rg-terraform-state \
+  --query "deleteRetentionPolicy" \
+  -o json
+```
+
+Verified result:
+
+```json
+{
+  "allowPermanentDelete": false,
+  "days": 7,
+  "enabled": true
+}
+```
+
+### 4.3 Enable Blob Versioning
+
+Blob Versioning preserves previous versions when a blob is modified.
+
+Command:
+
+```bash
+az storage account blob-service-properties update \
+  --account-name sttfstatezivkovic26 \
+  --resource-group rg-terraform-state \
+  --enable-versioning true \
+  --output none
+```
+
+Verification:
+
+```bash
+az storage account blob-service-properties show \
+  --account-name sttfstatezivkovic26 \
+  --resource-group rg-terraform-state \
+  --query "isVersioningEnabled" \
+  -o json
+```
+
+Verified result:
+
+```text
+true
+```
+
+Important:
+
+- Versioning does not replace backups.
+- Previous versions consume storage.
+- Restoring an older Terraform state requires careful analysis because it may not match actual Azure resources.
+
+### 4.4 Configure Lifecycle Management
+
+We created a lifecycle rule to delete previous versions older than 30 days.
+
+The rule targets only:
+
+```text
+tfstate/github-actions-deployment.tfstate
+```
+
+Lifecycle JSON:
+
+```json
+{
+  "rules": [
+    {
+      "enabled": true,
+      "name": "cleanup-old-terraform-state-versions",
+      "type": "Lifecycle",
+      "definition": {
+        "filters": {
+          "blobTypes": ["blockBlob"],
+          "prefixMatch": [
+            "tfstate/github-actions-deployment.tfstate"
+          ]
+        },
+        "actions": {
+          "version": {
+            "delete": {
+              "daysAfterCreationGreaterThan": 30
+            }
+          }
+        }
+      }
+    }
+  ]
+}
+```
+
+Command to apply a saved JSON policy:
+
+```bash
+az storage account management-policy create \
+  --account-name sttfstatezivkovic26 \
+  --resource-group rg-terraform-state \
+  --policy @/tmp/terraform-state-lifecycle.json
+```
+
+The JSON must first be saved to the specified file.
+
+Verification:
+
+```bash
+az storage account management-policy show \
+  --account-name sttfstatezivkovic26 \
+  --resource-group rg-terraform-state \
+  --query "policy.rules" \
+  -o json
+```
+
+Important:
+
+- The lifecycle rule targets previous versions, not the current state.
+- Lifecycle processing is asynchronous.
+- Other Terraform state blobs in the same container are not covered by this rule.
+
+## 5. Azure RBAC and Least Privilege
+
+Two GitHub Actions Service Principals are used.
+
+### PR Service Principal
+
+Name:
+
+```text
+github-actions-terraform-pr-oidc
+```
+
+Container role:
+
+```text
+Storage Blob Data Reader
+```
+
+Purpose:
+
+- Read Terraform remote state.
+- Run PR validation.
+- Avoid granting write access to Terraform state.
+
+### Deploy Service Principal
+
+Name:
+
+```text
+github-actions-terraform-oidc
+```
+
+Container role:
+
+```text
+Storage Blob Data Contributor
+```
+
+Purpose:
+
+- Read and update Terraform state.
+- Acquire and release state locks.
+- Execute Terraform deployment operations.
+
+The deployment identity also has the required Azure resource-management permissions on the deployment resource group.
+
+Commands used to inspect RBAC:
+
+```bash
+STORAGE_ID=$(az storage account show \
+  --name sttfstatezivkovic26 \
+  --resource-group rg-terraform-state \
+  --query id -o tsv)
+
+az role assignment list \
+  --scope "$STORAGE_ID" \
+  --include-inherited \
+  -o table
+
+az role assignment list \
+  --scope "$STORAGE_ID/blobServices/default/containers/tfstate" \
+  -o table
+```
+
+Do not combine `--all` and `--scope` in these Azure CLI commands.
+
+Verify Service Principal identity:
+
+```bash
+az ad sp show \
+  --id cfb7f91c-b5b8-4c6d-8284-8f86d1a1654b \
+  --query "{name:displayName,appId:appId,objectId:id}" \
+  -o json
+
+az ad sp show \
+  --id 739cdef8-a47a-4650-be24-913c906c6799 \
+  --query "{name:displayName,appId:appId,objectId:id}" \
+  -o json
+```
+
+## 6. Disable Shared Key Access
+
+Our Terraform workflows use:
+
+```yaml
+ARM_USE_OIDC: "true"
+ARM_USE_AZUREAD: "true"
+```
+
+The backend uses:
+
+```hcl
+use_azuread_auth = true
+use_oidc         = true
+```
+
+We disabled Shared Key authentication:
+
+```bash
+az storage account update \
+  --name sttfstatezivkovic26 \
+  --resource-group rg-terraform-state \
+  --allow-shared-key-access false \
+  --output none
+```
+
+Verification:
+
+```bash
+az storage account show \
+  --name sttfstatezivkovic26 \
+  --resource-group rg-terraform-state \
+  --query "{sharedKeyAccess:allowSharedKeyAccess,httpsOnly:enableHttpsTrafficOnly}" \
+  -o json
+```
+
+Verified:
+
+```json
+{
+  "httpsOnly": true,
+  "sharedKeyAccess": false
+}
+```
+
+Why:
+
+- Shared Key authentication can bypass data-plane RBAC restrictions.
+- Entra ID authentication uses identity-based access controls.
+- GitHub Actions uses OIDC rather than stored client secrets.
+
+Warning:
+
+Disabling Shared Key authentication may break other applications or scripts that depend on Storage Account keys.
+
+Rollback if required:
+
+```bash
+az storage account update \
+  --name sttfstatezivkovic26 \
+  --resource-group rg-terraform-state \
+  --allow-shared-key-access true \
+  --output none
+```
+
+## 7. Validate Terraform Backend
+
+Local validation:
+
+```bash
+cd ~/workspace/azure-learning-labs/github-actions/terraform-deployment-lab
+
+terraform init -input=false -no-color
+terraform state list
+```
+
+Verified state entries:
+
+```text
+data.azurerm_resource_group.lab
+azurerm_storage_account.lab
+```
+
+The local backend remained functional after Shared Key authentication was disabled.
+
+We also ran the GitHub Actions Terraform deployment workflow.
+
+Verified:
+
+```text
+Acquiring state lock.
+Releasing state lock.
+
+Apply complete! Resources: 0 added, 0 changed, 0 destroyed.
+```
+
+This confirmed that GitHub OIDC authentication and Terraform state access continued working after the security change.
+
+## 8. GitHub Actions Concurrency Control
+
+Concurrency controls how overlapping GitHub Actions workflow runs are handled.
+
+### 8.1 Deployment Workflow
+
+Configured in:
+
+```text
+.github/workflows/terraform-deploy.yml
+```
+
+Configuration:
+
+```yaml
+concurrency:
+  group: terraform-deployment-lab
+  cancel-in-progress: false
+```
+
+Explanation:
+
+- Runs in the same concurrency group cannot execute simultaneously.
+- A new run does not cancel the currently executing deployment.
+- GitHub normally permits one running and one pending run per group.
+- A newer pending run may replace an older pending run.
+- Concurrency is not a guaranteed FIFO queue.
+
+### 8.2 PR Workflow
+
+Configured in:
+
+```text
+.github/workflows/terraform-pr.yml
+```
+
+Configuration:
+
+```yaml
+concurrency:
+  group: terraform-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+```
+
+Explanation:
+
+- Each Pull Request has its own concurrency group.
+- A new run of the same PR cancels its previous run.
+- Different PRs can run independently.
+- This reduces unnecessary execution of outdated validation runs.
+
+Git workflow used:
+
+```bash
+git switch -c feature/terraform-pr-concurrency
+
+git add .github/workflows/terraform-pr.yml
+
+git commit -m "ci: add concurrency control to Terraform PR workflow"
+
+git push -u origin feature/terraform-pr-concurrency
+```
+
+The change was validated through a Pull Request and merged into `main`.
+
+Relevant commits:
+
+```text
+4f8c0e9 ci: add concurrency control to Terraform PR workflow
+e648155 Merge pull request #6 from Tomislav89/feature/terraform-pr-concurrency
+```
+
+Note:
+
+The successful PR run validated the configuration, but overlapping PR runs were not separately simulated to demonstrate automatic cancellation.
+
+## 9. GitHub Environment Approval
+
+The Terraform Apply job uses:
+
+```yaml
+terraform-apply:
+  if: inputs.operation == 'apply'
+  needs: terraform-plan
+
+  environment:
+    name: dev
+```
+
+Explanation:
+
+- Apply runs only when `operation` is `apply`.
+- Apply depends on a successful Plan job.
+- The GitHub Environment applies configured deployment protection rules.
+- Required reviewers must approve the deployment before the protected job starts.
+
+Verified `dev` Environment settings:
+
+- Required reviewers enabled.
+- Reviewer: `Tomislav89`.
+- Self-review allowed for this lab.
+- Wait timer disabled.
+- Allowed deployment branch: `main`.
+- Environment variables configured for Azure deployment authentication.
+- No Azure client secret stored in Environment secrets.
+
+The deployment uses a saved Terraform plan artifact.
+
+Plan job:
+
+```bash
+terraform plan -input=false -no-color -out=tfplan
+```
+
+Apply job:
+
+```bash
+terraform apply -input=false -no-color tfplan
+```
+
+### Production Recommendations
+
+For production deployments:
+
+- Use a dedicated `prod` GitHub Environment.
+- Require approval from a different authorized reviewer.
+- Disable administrator bypass where appropriate.
+- Restrict deployment branches.
+- Use a separate production Azure identity.
+- Use a separate production Terraform state.
+- Apply least-privilege Azure RBAC.
+- Review Terraform plans before approval.
+- Protect plan artifacts because they may contain sensitive information.
+- Review how plan artifacts are transferred between jobs.
+
+Environment approval controls when a job can start.
+
+Azure RBAC controls which Azure operations the authenticated identity can perform.
+
+Both controls are needed.
+
+## 10. Terraform State Locking
+
+Terraform uses Azure Blob leases to coordinate state access.
+
+Observed during Apply:
+
+```text
+Acquiring state lock. This may take a few moments...
+Releasing state lock. This may take a few moments...
+```
+
+State locking helps prevent simultaneous state modifications.
+
+GitHub Actions concurrency and Terraform state locking solve related but different problems:
+
+- Concurrency coordinates GitHub workflow runs.
+- State locking coordinates Terraform operations accessing the same state.
+
+Our PR workflow uses:
+
+```bash
+terraform plan -input=false -no-color -lock=false -refresh=false
+```
+
+This was selected for the read-only validation lab.
+
+Limitations:
+
+- State locking is disabled for this PR plan.
+- Azure resource refresh is disabled.
+- Infrastructure drift may not be detected.
+- Concurrent infrastructure changes can make the plan stale.
+
+These flags are not general production recommendations.
+
+## 11. Troubleshooting
+
+### Terraform backend authentication fails
+
+Check:
+
+```bash
+az account show -o table
+```
+
+Verify:
+
+- Azure authentication is valid.
+- The Service Principal has the correct Blob Data role.
+- The backend is configured for Entra ID authentication.
+- GitHub OIDC federation matches the workflow context.
+- The Storage Account allows the intended network access.
+
+### Shared Key authentication errors
+
+After disabling Shared Key access, applications using Storage Account keys may fail.
+
+Verify:
+
+```bash
+az storage account show \
+  --name sttfstatezivkovic26 \
+  --resource-group rg-terraform-state \
+  --query "allowSharedKeyAccess" \
+  -o json
+```
+
+Expected:
+
+```text
+false
+```
+
+### Terraform state is locked
+
+A running Terraform operation may hold a Blob lease.
+
+Do not immediately force-unlock.
+
+First:
+
+1. Check whether another Terraform operation is running.
+2. Check GitHub Actions workflow status.
+3. Wait for the active operation to finish.
+4. Investigate stale locks before considering manual intervention.
+
+### Azure CLI RBAC command fails
+
+Do not combine:
+
+```text
+--all
+--scope
+```
+
+Use a scoped query instead:
+
+```bash
+az role assignment list --scope "$STORAGE_ID" -o table
+```
+
+### Lifecycle policy not found
+
+If Azure returns:
+
+```text
+ManagementPolicyNotFound
+```
+
+No lifecycle management policy currently exists on the Storage Account.
+
+### GitHub Actions deployment is waiting
+
+Check:
+
+- Environment required reviewers.
+- Deployment branch restrictions.
+- Pending approval status.
+- Workflow concurrency group.
+
+## 12. Final Validation
+
+Successfully completed:
+
+1. Workflow permission review.
+2. GitHub Actions SHA pinning.
+3. Terraform state Soft Delete.
+4. Terraform state Blob Versioning.
+5. Lifecycle Management configuration.
+6. Azure RBAC verification.
+7. Shared Key authentication disabled.
+8. Local Terraform backend validation.
+9. GitHub OIDC Terraform Plan and Apply validation.
+10. Deployment concurrency verification.
+11. PR concurrency implementation and merge.
+12. GitHub Environment approval verification.
+
+Final Terraform Apply:
+
+```text
+Apply complete! Resources: 0 added, 0 changed, 0 destroyed.
+```
+
+No infrastructure changes were required during the final validation.
+
+**Lesson 9 completed successfully.**
