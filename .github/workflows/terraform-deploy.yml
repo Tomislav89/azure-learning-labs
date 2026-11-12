@@ -76,7 +76,7 @@ jobs:
 
   terraform-apply:
     name: Terraform Apply
-    if: inputs.operation == 'apply'
+    if: inputs.operation == 'apply' && github.ref == 'refs/heads/main'
     needs: terraform-plan
     runs-on: ubuntu-latest
 
