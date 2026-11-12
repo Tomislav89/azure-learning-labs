@@ -27,3 +27,14 @@ jobs:
 
     with:
       terraform_directory: github-actions/terraform-deployment-lab
+
+  show-validation-result:
+    name: Show Validation Result
+    needs: terraform-pr-validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Display Terraform Validation Result
+        env:
+          VALIDATION_STATUS: ${{ needs.terraform-pr-validation.outputs.validation_status }}
+        run: echo "Terraform validation status is $VALIDATION_STATUS"
