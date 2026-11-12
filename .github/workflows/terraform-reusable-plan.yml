@@ -7,6 +7,10 @@ on:
         description: "Directory containing Terraform configuration"
         required: true
         type: string
+    outputs:
+      validation_status:
+        description: "Terraform validation result"
+        value: ${{ jobs.terraform-plan.outputs.validation_status }}
 
 permissions:
   contents: read
@@ -15,6 +19,9 @@ jobs:
   terraform-plan:
     name: Reusable Terraform Plan
     runs-on: ubuntu-latest
+
+    outputs:
+      validation_status: ${{ steps.result.outputs.status }}
 
     permissions:
       contents: read
@@ -58,3 +65,7 @@ jobs:
       - name: Terraform Plan
         working-directory: ${{ inputs.terraform_directory }}
         run: terraform plan -input=false -no-color -lock=false -refresh=false
+
+      - name: Set Validation Result
+        id: result
+        run: echo "status=passed" >> "$GITHUB_OUTPUT"
