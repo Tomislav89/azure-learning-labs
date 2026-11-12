@@ -3459,3 +3459,466 @@ Apply complete! Resources: 0 added, 0 changed, 0 destroyed.
 No infrastructure changes were required during the final validation.
 
 **Lesson 9 completed successfully.**
+
+
+---
+
+# GitHub Actions – Lesson 10: Reusable Workflows and Outputs
+
+## 1. Objective
+
+The objective of this lesson is to understand how to create reusable GitHub Actions workflows, pass input parameters, return output values, and organize Terraform CI pipelines without duplicating workflow logic.
+
+The implementation uses two workflows:
+
+- `.github/workflows/terraform-pr.yml` – caller workflow.
+- `.github/workflows/terraform-reusable-plan.yml` – reusable workflow.
+
+Both workflows were implemented, tested through Pull Requests, and merged into the main branch.
+
+## 2. Why Reusable Workflows?
+
+Without reusable workflows, multiple pipelines may contain identical steps:
+
+- Checkout repository.
+- Setup Terraform.
+- Terraform Format Check.
+- Azure Login via OIDC.
+- Terraform Init.
+- Terraform Validate.
+- Terraform Plan.
+
+Duplicating these steps increases maintenance effort and the risk of inconsistent configurations.
+
+Reusable workflows allow common CI logic to be defined once and invoked by other workflows.
+
+Benefits:
+
+1. Reduced code duplication.
+2. Centralized pipeline maintenance.
+3. Consistent Terraform validation.
+4. Easier parameterization.
+5. Improved separation of responsibilities.
+
+## 3. Caller vs Reusable Workflow
+
+### Caller Workflow
+
+File:
+
+`.github/workflows/terraform-pr.yml`
+
+The caller determines when the pipeline runs and which reusable workflow should execute.
+
+Example:
+
+```yaml
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  terraform-pr-validation:
+    uses: ./.github/workflows/terraform-reusable-plan.yml
+
+    with:
+      terraform_directory: github-actions/terraform-deployment-lab
+```
+
+The caller passes the Terraform directory using `with`.
+
+### Reusable Workflow
+
+File:
+
+`.github/workflows/terraform-reusable-plan.yml`
+
+The reusable workflow contains the actual Terraform validation steps.
+
+It is invoked through:
+
+```yaml
+on:
+  workflow_call:
+```
+
+The reusable workflow does not require its own independent Pull Request trigger.
+
+## 4. workflow_call vs pull_request
+
+`pull_request` is an event trigger.
+
+Example:
+
+```yaml
+on:
+  pull_request:
+    branches:
+      - main
+```
+
+It starts the workflow when a matching Pull Request event occurs.
+
+`workflow_call` enables another workflow to invoke the reusable workflow.
+
+Example:
+
+```yaml
+on:
+  workflow_call:
+```
+
+The caller receives the event and invokes the reusable workflow.
+
+## 5. Inputs and with
+
+Reusable workflow:
+
+```yaml
+on:
+  workflow_call:
+    inputs:
+      terraform_directory:
+        description: "Directory containing Terraform configuration"
+        required: true
+        type: string
+```
+
+Explanation:
+
+- `inputs` defines accepted input parameters.
+- `terraform_directory` is the parameter name.
+- `required: true` means the caller must supply it.
+- `type: string` means the parameter is textual.
+
+Caller:
+
+```yaml
+with:
+  terraform_directory: github-actions/terraform-deployment-lab
+```
+
+The caller supplies the actual directory.
+
+Inside the reusable workflow:
+
+```yaml
+- name: Terraform Init
+  working-directory: ${{ inputs.terraform_directory }}
+  run: terraform init -input=false
+```
+
+GitHub Actions resolves the input to:
+
+`github-actions/terraform-deployment-lab`
+
+The Terraform Init command runs from that directory.
+
+This is conceptually equivalent to changing into the directory before executing Terraform Init.
+
+## 6. Step Outputs
+
+A step can produce a named output using the GitHub Actions environment file referenced by `$GITHUB_OUTPUT`.
+
+Example:
+
+```yaml
+- name: Set Validation Result
+  id: result
+  run: echo "status=passed" >> "$GITHUB_OUTPUT"
+```
+
+Explanation:
+
+- `id: result` identifies the step.
+- `status` is the output name.
+- `passed` is the output value.
+- `$GITHUB_OUTPUT` is a predefined GitHub Actions environment variable containing a file path.
+- `>>` appends the output declaration to that file.
+
+The step output is accessed through:
+
+```yaml
+${{ steps.result.outputs.status }}
+```
+
+Reference breakdown:
+
+- `steps` – built-in GitHub Actions context.
+- `result` – value defined in `id: result`.
+- `outputs` – built-in property containing step outputs.
+- `status` – output name written to `$GITHUB_OUTPUT`.
+
+The names `result` and `status` are user-defined.
+
+The variable name `GITHUB_OUTPUT` is predefined by GitHub Actions and should not be renamed.
+
+The output is set after the Terraform Plan step, so under normal step execution the result step runs only when the preceding Terraform checks have succeeded.
+
+## 7. Job Outputs
+
+A step output is initially accessible within its job.
+
+To expose the value as a job output:
+
+```yaml
+jobs:
+  terraform-plan:
+    runs-on: ubuntu-latest
+
+    outputs:
+      validation_status: ${{ steps.result.outputs.status }}
+```
+
+Explanation:
+
+- `outputs` declares outputs of the job.
+- `validation_status` is the job output name.
+- `steps.result.outputs.status` references the earlier step output.
+
+The resulting job output is:
+
+`validation_status = passed`
+
+## 8. Reusable Workflow Outputs
+
+To return the job output to the caller, the reusable workflow must declare an output under `workflow_call`.
+
+```yaml
+on:
+  workflow_call:
+    outputs:
+      validation_status:
+        description: "Terraform validation result"
+        value: ${{ jobs.terraform-plan.outputs.validation_status }}
+```
+
+Explanation:
+
+- `workflow_call.outputs` declares outputs exposed to callers.
+- `validation_status` is the public workflow output name.
+- `jobs.terraform-plan.outputs.validation_status` references the job output.
+
+The complete data flow is:
+
+```text
+Step:
+  echo "status=passed" >> "$GITHUB_OUTPUT"
+                  |
+                  v
+Step Output:
+  steps.result.outputs.status
+                  |
+                  v
+Job Output:
+  validation_status
+                  |
+                  v
+Workflow Output:
+  jobs.terraform-plan.outputs.validation_status
+                  |
+                  v
+Caller:
+  needs.terraform-pr-validation.outputs.validation_status
+```
+
+## 9. Reading Outputs in the Caller
+
+The caller contains a job that invokes the reusable workflow:
+
+```yaml
+jobs:
+  terraform-pr-validation:
+    uses: ./.github/workflows/terraform-reusable-plan.yml
+
+    with:
+      terraform_directory: github-actions/terraform-deployment-lab
+```
+
+A second job reads the result:
+
+```yaml
+  show-validation-result:
+    name: Show Validation Result
+    needs: terraform-pr-validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Display Terraform Validation Result
+        env:
+          VALIDATION_STATUS: ${{ needs.terraform-pr-validation.outputs.validation_status }}
+        run: echo "Terraform validation status is $VALIDATION_STATUS"
+```
+
+Explanation:
+
+- `needs: terraform-pr-validation` establishes a dependency.
+- The second job waits for the reusable workflow job to finish successfully.
+- `needs.terraform-pr-validation.outputs.validation_status` reads the returned output.
+- `env` passes the value to the shell step.
+- `$VALIDATION_STATUS` accesses the shell environment variable.
+
+Expected output:
+
+```text
+Terraform validation status is passed
+```
+
+## 10. Security Architecture
+
+The reusable Terraform PR workflow uses GitHub OIDC authentication.
+
+Relevant settings:
+
+```yaml
+permissions:
+  contents: read
+  id-token: write
+```
+
+`contents: read` allows repository checkout.
+
+`id-token: write` allows the job to request an OIDC token for Azure authentication.
+
+Azure configuration:
+
+```yaml
+env:
+  ARM_USE_OIDC: "true"
+  ARM_USE_AZUREAD: "true"
+  ARM_CLIENT_ID: ${{ vars.AZURE_PR_CLIENT_ID }}
+  ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+```
+
+The PR workflow uses a separate Azure identity from the deployment workflow.
+
+The PR identity has read-only access to the Terraform state container.
+
+The PR Terraform Plan command uses:
+
+```bash
+terraform plan -input=false -no-color -lock=false -refresh=false
+```
+
+The PR workflow is restricted to same-repository Pull Requests:
+
+```yaml
+if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+```
+
+This prevents the privileged Terraform validation job from running for fork-based Pull Requests.
+
+The deployment workflow remains separate and retains its own Azure identity, state-locking behavior, saved plan artifact, and environment approval process.
+
+## 11. Practical Implementation and Testing
+
+### Pull Request #7 – Reusable Workflow
+
+Feature branch:
+
+`feature/terraform-reusable-workflow`
+
+Commit:
+
+`dfc070c ci: introduce reusable Terraform PR workflow`
+
+Implemented:
+
+- Reusable Terraform PR workflow.
+- `workflow_call` trigger.
+- Required `terraform_directory` input.
+- Caller using job-level `uses`.
+- Terraform validation steps moved to the reusable workflow.
+- Existing OIDC and security restrictions preserved.
+
+GitHub Actions validation passed.
+
+Merge commit:
+
+`fd3a3f9`
+
+### Pull Request #8 – Workflow Outputs
+
+Feature branch:
+
+`feature/terraform-reusable-outputs`
+
+Commit:
+
+`410ccf8 ci: expose reusable Terraform validation outputs`
+
+Implemented:
+
+- Step output using `$GITHUB_OUTPUT`.
+- Job output `validation_status`.
+- Reusable workflow output `validation_status`.
+- Caller job `show-validation-result`.
+- Dependency using `needs`.
+- Output access using the `needs` context.
+
+GitHub Actions results:
+
+- Reusable Terraform Plan – successful in 36 seconds.
+- Show Validation Result – successful in 3 seconds.
+
+Both checks passed.
+
+Merge commit:
+
+`5a60b99`
+
+The checks confirmed successful execution of both jobs. The exact displayed output text was not separately recorded in the terminal evidence.
+
+## 12. Validation Commands
+
+Validate workflow YAML syntax:
+
+```bash
+python3 - <<'PY'
+from pathlib import Path
+import yaml
+
+for name in [
+    ".github/workflows/terraform-reusable-plan.yml",
+    ".github/workflows/terraform-pr.yml",
+]:
+    with Path(name).open() as f:
+        yaml.safe_load(f)
+    print(f"YAML syntax OK: {name}")
+PY
+```
+
+Check Git changes:
+
+```bash
+git diff --check
+git diff --stat
+git status --short
+```
+
+Verify commits:
+
+```bash
+git log -3 --oneline
+```
+
+Note: YAML parsing validates basic syntax but does not replace GitHub Actions workflow execution or semantic validation.
+
+## 13. Key Takeaways
+
+1. `pull_request` starts the caller workflow.
+2. `workflow_call` allows a workflow to be invoked by another workflow.
+3. `uses` identifies the reusable workflow.
+4. `with` passes input values.
+5. `inputs` receives those values.
+6. `working-directory` determines where commands execute.
+7. `$GITHUB_OUTPUT` creates step outputs.
+8. `steps.<step_id>.outputs.<name>` reads step outputs.
+9. Job outputs expose step values at job level.
+10. Workflow outputs expose job values to callers.
+11. `needs` establishes job dependencies and allows access to their outputs.
+12. Reusable PR validation and deployment workflows must retain appropriate security boundaries.
+
+**Lesson 10 – Reusable Workflows and Outputs: implementation completed and tested.**
