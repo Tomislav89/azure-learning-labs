@@ -3922,3 +3922,801 @@ Note: YAML parsing validates basic syntax but does not replace GitHub Actions wo
 12. Reusable PR validation and deployment workflows must retain appropriate security boundaries.
 
 **Lesson 10 – Reusable Workflows and Outputs: implementation completed and tested.**
+
+
+---
+
+# Lesson 11 – Final Terraform CI/CD Project
+
+## 1. Project Overview
+
+This project demonstrates a practical Terraform CI/CD implementation using GitHub Actions and Microsoft Azure.
+
+The objective is to manage Azure infrastructure through version-controlled Terraform code, validate proposed changes through Pull Requests, and deploy infrastructure through a controlled workflow.
+
+The implementation builds on the previous GitHub Actions lessons.
+
+### Implemented Features
+
+- GitHub Actions CI/CD workflows
+- Terraform infrastructure as code
+- Azure authentication using OpenID Connect (OIDC)
+- Azure Storage remote backend
+- Terraform state locking
+- Pull Request validation
+- Reusable GitHub Actions workflows
+- Workflow inputs and outputs
+- Terraform plan artifacts
+- Manual deployment approval
+- Separate PR and deployment identities
+- GitHub Actions permission hardening
+- SHA-pinned third-party actions
+- Deployment concurrency control
+- Apply restriction to the main branch
+
+The project uses an existing Azure Resource Group and manages an Azure Storage Account.
+
+## 2. Repository Structure
+
+```text
+azure-learning-labs/
+|
+|-- .github/
+|   `-- workflows/
+|       |-- azure-oidc.yml
+|       |-- hello-world.yml
+|       |-- terraform-ci.yml
+|       |-- terraform-deploy.yml
+|       |-- terraform-pr.yml
+|       `-- terraform-reusable-plan.yml
+|
+`-- github-actions/
+    |-- README.md
+    `-- terraform-deployment-lab/
+        |-- backend.tf
+        |-- main.tf
+        |-- providers.tf
+        `-- .terraform.lock.hcl
+```
+
+The main workflows for the final project are:
+
+- `terraform-pr.yml`: Pull Request validation caller
+- `terraform-reusable-plan.yml`: reusable Terraform validation workflow
+- `terraform-deploy.yml`: manual Terraform deployment workflow
+
+Other workflow files represent earlier learning exercises.
+
+## 3. Terraform Infrastructure
+
+The Terraform configuration is located in:
+
+```text
+github-actions/terraform-deployment-lab/
+```
+
+### Resource Group
+
+```hcl
+data "azurerm_resource_group" "lab" {
+  name = "rg-github-oidc-lab"
+}
+```
+
+This data source references an existing Azure Resource Group.
+
+Terraform does not create the Resource Group in this configuration.
+
+### Storage Account
+
+```hcl
+resource "azurerm_storage_account" "lab" {
+  name                     = "stgha26lab001"
+  resource_group_name      = data.azurerm_resource_group.lab.name
+  location                 = data.azurerm_resource_group.lab.location
+  account_tier             = "Standard"
+  account_replication_type = "LRS"
+
+  min_tls_version                 = "TLS1_2"
+  allow_nested_items_to_be_public = false
+
+  tags = {
+    environment = "lab"
+    managed_by  = "terraform"
+    project     = "github-actions"
+    owner       = "devops-lab"
+  }
+}
+```
+
+The Storage Account is managed by Terraform.
+
+Its Resource Group and Azure region are obtained from the existing Resource Group data source.
+
+## 4. Terraform Provider
+
+The project uses the AzureRM provider.
+
+```hcl
+terraform {
+  required_version = ">= 1.5.0"
+
+  required_providers {
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = "~> 4.0"
+    }
+  }
+}
+```
+
+The provider configuration specifies the Azure subscription.
+
+Authentication is supplied by the GitHub Actions workflow through OIDC-related environment variables.
+
+This avoids storing Azure client secrets in Terraform configuration.
+
+## 5. Terraform Remote Backend
+
+Terraform state is stored in Azure Storage.
+
+```hcl
+terraform {
+  backend "azurerm" {
+    resource_group_name  = "rg-terraform-state"
+    storage_account_name = "sttfstatezivkovic26"
+    container_name       = "tfstate"
+    key                  = "github-actions-deployment.tfstate"
+
+    use_azuread_auth = true
+    use_oidc         = true
+  }
+}
+```
+
+### Backend Components
+
+| Component | Value |
+|---|---|
+| Resource Group | rg-terraform-state |
+| Storage Account | sttfstatezivkovic26 |
+| Container | tfstate |
+| State Key | github-actions-deployment.tfstate |
+| Authentication | Azure AD / OIDC |
+
+The backend Storage Account is separate from the Storage Account managed by the Terraform configuration.
+
+### Why Remote State?
+
+Remote state provides:
+
+1. Centralized Terraform state storage.
+2. Shared state access for authorized automation.
+3. State locking to coordinate Terraform operations.
+4. Persistence across temporary GitHub Actions runners.
+5. Better separation between code and infrastructure state.
+
+Terraform state can contain sensitive information and must be protected.
+
+### State Locking
+
+During the final Apply test, Terraform displayed:
+
+```text
+Acquiring state lock. This may take a few moments...
+Releasing state lock. This may take a few moments...
+```
+
+This confirms that Terraform successfully acquired and released the state lock during that execution.
+
+## 6. Azure OIDC Authentication
+
+The project authenticates GitHub Actions to Azure using OpenID Connect.
+
+### Authentication Flow
+
+```text
+GitHub Actions Job
+        |
+        v
+GitHub OIDC Token
+        |
+        v
+Microsoft Entra ID
+        |
+        v
+Federated Identity Credential
+        |
+        v
+Azure Service Principal
+        |
+        v
+Azure RBAC Authorization
+        |
+        v
+Azure Resources / Terraform State
+```
+
+OIDC avoids the need to store a long-lived client secret in GitHub.
+
+The workflows use:
+
+```yaml
+permissions:
+  contents: read
+  id-token: write
+```
+
+The `id-token: write` permission allows the job to request a GitHub OIDC token.
+
+Azure validates the token against the configured federated identity credential.
+
+### Separate Identities
+
+The implementation uses separate identities for:
+
+- Pull Request validation
+- Terraform deployment
+
+The PR identity has read-oriented permissions for validation.
+
+The deployment identity has the permissions required for the deployment workflow.
+
+This separation supports the principle of least privilege.
+
+## 7. Pull Request Validation Pipeline
+
+The Pull Request workflow is:
+
+```text
+.github/workflows/terraform-pr.yml
+```
+
+It is triggered by Pull Requests targeting `main` when relevant Terraform configuration or validation workflow files change.
+
+### Validation Flow
+
+```text
+Feature Branch
+      |
+      v
+Pull Request to main
+      |
+      v
+terraform-pr.yml
+      |
+      v
+terraform-reusable-plan.yml
+      |
+      |-- Checkout
+      |-- Setup Terraform
+      |-- Terraform Format Check
+      |-- Azure Login via OIDC
+      |-- Terraform Init
+      |-- Terraform Validate
+      `-- Terraform Plan
+      |
+      v
+Validation Result Output
+      |
+      v
+Caller Displays Result
+```
+
+The reusable workflow accepts the Terraform directory as an input.
+
+```yaml
+with:
+  terraform_directory: github-actions/terraform-deployment-lab
+```
+
+This allows the reusable workflow to execute Terraform commands in the correct project directory.
+
+### PR Security Restrictions
+
+The reusable workflow contains a condition restricting execution to Pull Requests originating from the same repository.
+
+The PR Terraform Plan uses:
+
+```bash
+terraform plan -input=false -no-color -lock=false -refresh=false
+```
+
+The `-lock=false` option disables state locking for this validation plan.
+
+The `-refresh=false` option avoids refreshing the state from live infrastructure during the plan.
+
+These flags do not make the plan universally read-only. Azure RBAC permissions remain an essential security boundary.
+
+The PR workflow does not execute Terraform Apply.
+
+## 8. Reusable Workflow Outputs
+
+The reusable workflow demonstrates output propagation across multiple GitHub Actions levels.
+
+### Step Output
+
+```bash
+echo "status=passed" >> "$GITHUB_OUTPUT"
+```
+
+This writes a step output named `status`.
+
+### Job Output
+
+```yaml
+outputs:
+  validation_status: ${{ steps.result.outputs.status }}
+```
+
+The job exposes the step output as `validation_status`.
+
+### Workflow Output
+
+```yaml
+on:
+  workflow_call:
+    outputs:
+      validation_status:
+        description: "Terraform validation result"
+        value: ${{ jobs.terraform-plan.outputs.validation_status }}
+```
+
+The reusable workflow exposes the job output to its caller.
+
+### Caller Output
+
+```yaml
+env:
+  VALIDATION_STATUS: ${{ needs.terraform-pr-validation.outputs.validation_status }}
+```
+
+The caller reads the output from the completed reusable workflow job.
+
+This demonstrates:
+
+```text
+Step Output
+     |
+     v
+Job Output
+     |
+     v
+Reusable Workflow Output
+     |
+     v
+Caller Workflow
+```
+
+## 9. Manual Terraform Deployment
+
+The deployment workflow is:
+
+```text
+.github/workflows/terraform-deploy.yml
+```
+
+It uses:
+
+```yaml
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: "Terraform operation"
+        required: true
+        type: choice
+        default: plan
+        options:
+          - plan
+          - apply
+```
+
+This allows a user to manually select either:
+
+- `plan`
+- `apply`
+
+### Plan Operation
+
+When `plan` is selected:
+
+1. The Terraform Plan job executes.
+2. Terraform initializes the backend.
+3. Terraform formatting and validation run.
+4. Terraform creates a saved plan.
+5. Artifact upload is skipped.
+6. Terraform Apply is skipped.
+
+The plan is saved locally on the temporary runner, but it is not uploaded as a GitHub Actions artifact.
+
+### Apply Operation
+
+When `apply` is selected:
+
+1. Terraform Plan executes.
+2. The saved plan is uploaded as an artifact.
+3. Terraform Apply waits for the Plan job.
+4. GitHub Environment approval is required.
+5. The Apply job downloads the artifact.
+6. Terraform executes the saved plan.
+
+## 10. Terraform Plan Artifact
+
+The deployment workflow creates a saved plan using:
+
+```bash
+terraform plan -input=false -no-color -out=tfplan
+```
+
+The `-out=tfplan` option saves the planned changes into a file.
+
+The file is created in:
+
+```text
+github-actions/terraform-deployment-lab/tfplan
+```
+
+### Upload Artifact
+
+```yaml
+- name: Upload Terraform Plan
+  if: inputs.operation == 'apply'
+  uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  with:
+    name: terraform-plan
+    path: github-actions/terraform-deployment-lab/tfplan
+    retention-days: 1
+    if-no-files-found: error
+```
+
+The artifact is uploaded only when the requested operation is `apply`.
+
+### Download Artifact
+
+```yaml
+- name: Download Terraform Plan
+  uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+  with:
+    name: terraform-plan
+    path: github-actions/terraform-deployment-lab
+```
+
+The Apply job downloads the plan into its own runner workspace.
+
+### Apply Saved Plan
+
+```bash
+terraform apply -input=false -no-color tfplan
+```
+
+This executes the saved plan instead of generating a new plan.
+
+The saved plan should be reviewed and protected because it may contain sensitive information.
+
+## 11. GitHub Environment Approval
+
+The Terraform Apply job uses:
+
+```yaml
+environment:
+  name: dev
+```
+
+The `dev` environment is configured with deployment protection rules.
+
+The deployment workflow requires approval before the Apply job proceeds.
+
+This separates infrastructure planning from infrastructure modification.
+
+### Why Approval Matters
+
+A successful Terraform Plan does not guarantee that Terraform Apply will succeed.
+
+Apply may fail because of:
+
+- Missing Azure permissions
+- Resource conflicts
+- Azure API errors
+- Quota restrictions
+- Changes in infrastructure between Plan and Apply
+
+A failed Apply may leave some resources modified.
+
+Terraform Apply is not automatically an atomic transaction or rollback mechanism.
+
+## 12. Apply Branch Restriction
+
+Pull Request #9 introduced an additional Apply restriction.
+
+Previous condition:
+
+```yaml
+if: inputs.operation == 'apply'
+```
+
+Updated condition:
+
+```yaml
+if: inputs.operation == 'apply' && github.ref == 'refs/heads/main'
+```
+
+Both conditions must be true:
+
+1. The user selected the `apply` operation.
+2. The workflow was started from the `main` branch.
+
+The Plan job can still execute from another branch.
+
+This restriction adds a workflow-level safeguard.
+
+### Important Distinction
+
+A Git branch is not an isolated Azure environment.
+
+If two branches use the same backend and Azure resources, Terraform Apply from either branch may affect the same infrastructure.
+
+Proper environment isolation requires separate Terraform state and appropriately separated Azure resources.
+
+## 13. Deployment Concurrency
+
+The deployment workflow uses:
+
+```yaml
+concurrency:
+  group: terraform-deployment-lab
+  cancel-in-progress: false
+```
+
+This reduces the risk of overlapping deployment workflow runs.
+
+The workflow is configured not to cancel an already running deployment when another run enters the concurrency group.
+
+Terraform state locking provides an additional mechanism for coordinating state operations.
+
+## 14. GitHub Actions Security Hardening
+
+The implementation includes several security controls.
+
+### Minimal Permissions
+
+Workflows default to:
+
+```yaml
+permissions:
+  contents: read
+```
+
+Jobs requiring Azure OIDC request:
+
+```yaml
+permissions:
+  contents: read
+  id-token: write
+```
+
+### SHA-Pinned Actions
+
+Third-party GitHub Actions are referenced using full commit hashes rather than mutable version tags.
+
+Examples:
+
+```yaml
+uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+```
+
+```yaml
+uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
+```
+
+```yaml
+uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6
+```
+
+This reduces the risk of unexpectedly executing a changed action version.
+
+### Additional Controls
+
+- Separate Azure identities for PR validation and deployment
+- Azure RBAC-based authorization
+- Remote state access restrictions
+- GitHub Environment approval
+- Apply restricted to main
+- Deployment concurrency
+- Short artifact retention
+- Same-repository PR execution restriction
+
+These controls improve security but do not eliminate every possible CI/CD risk.
+
+## 15. End-to-End Testing
+
+The final project was tested through GitHub Actions.
+
+### Test 1 – Terraform Plan
+
+Workflow operation:
+
+```text
+plan
+```
+
+Observed result:
+
+```text
+No changes. Your infrastructure matches the configuration.
+```
+
+The Terraform Plan job completed successfully.
+
+The artifact upload step was skipped because the selected operation was `plan`.
+
+The Terraform Apply job was also skipped.
+
+This was the expected behavior.
+
+### Test 2 – Terraform Apply
+
+Workflow operation:
+
+```text
+apply
+```
+
+The deployment workflow completed successfully.
+
+The final Terraform Apply log showed:
+
+```text
+Run terraform apply -input=false -no-color tfplan
+Acquiring state lock. This may take a few moments...
+Releasing state lock. This may take a few moments...
+
+Apply complete! Resources: 0 added, 0 changed, 0 destroyed.
+```
+
+### Test Result
+
+The final Apply completed successfully without adding, changing, or destroying Azure resources.
+
+The test confirms that the existing infrastructure was already consistent with the applied Terraform plan.
+
+## 16. Troubleshooting
+
+### Terraform Init Fails
+
+Check:
+
+- Backend Storage Account name
+- Container name
+- State key
+- Azure OIDC configuration
+- Azure RBAC permissions
+
+### OIDC Authentication Fails
+
+Check:
+
+- Azure Client ID
+- Tenant ID
+- Subscription ID
+- GitHub OIDC token permission
+- Federated identity credential subject
+- Repository and branch restrictions
+
+### Terraform Plan Fails
+
+Check:
+
+- Terraform syntax
+- Provider configuration
+- Azure permissions
+- Referenced Azure resources
+- Terraform state consistency
+
+### Artifact Download Fails
+
+Check:
+
+- The workflow was started with `apply`
+- The Upload Terraform Plan step succeeded
+- The artifact name matches
+- The artifact has not expired
+- The artifact path is correct
+
+### Terraform Apply Is Skipped
+
+Check:
+
+```yaml
+if: inputs.operation == 'apply' && github.ref == 'refs/heads/main'
+```
+
+Apply is skipped when the selected operation is not `apply` or the workflow is not running from `main`.
+
+### Apply Fails After Plan Succeeds
+
+A successful Plan does not guarantee successful Apply.
+
+Inspect the exact Terraform error before retrying.
+
+Avoid blindly rerunning failed deployments because infrastructure may already have been partially modified.
+
+## 17. Useful Commands
+
+### Check Repository
+
+```bash
+cd ~/workspace/azure-learning-labs
+
+git status
+git log -5 --oneline
+```
+
+### Inspect Terraform Configuration
+
+```bash
+cat github-actions/terraform-deployment-lab/main.tf
+cat github-actions/terraform-deployment-lab/providers.tf
+cat github-actions/terraform-deployment-lab/backend.tf
+```
+
+### Inspect Workflows
+
+```bash
+cat .github/workflows/terraform-pr.yml
+cat .github/workflows/terraform-reusable-plan.yml
+cat .github/workflows/terraform-deploy.yml
+```
+
+### Validate Terraform Formatting
+
+```bash
+terraform fmt -check -recursive github-actions/terraform-deployment-lab
+```
+
+### Check Git Changes
+
+```bash
+git diff --check
+git diff --stat
+git status --short
+```
+
+## 18. Project History
+
+The final implementation builds on several completed Pull Requests.
+
+| Pull Request | Purpose |
+|---|---|
+| #7 | Introduce reusable Terraform PR validation workflow |
+| #8 | Expose validation results through workflow outputs |
+| #9 | Restrict Terraform Apply to main branch |
+
+The final project combines the concepts introduced throughout the GitHub Actions learning track.
+
+## 19. Lessons Learned
+
+1. GitHub Actions can automate Terraform validation and deployment.
+2. OIDC provides Azure authentication without storing long-lived client secrets.
+3. Terraform remote state persists across temporary runners.
+4. Terraform state locking coordinates access to shared state.
+5. Pull Request validation helps detect problems before merge.
+6. Reusable workflows reduce duplicated pipeline logic.
+7. Step, job, and workflow outputs allow results to flow between workflow components.
+8. A saved Terraform plan can be transferred between jobs using artifacts.
+9. GitHub Environment approvals provide a deployment control point.
+10. A successful Plan does not guarantee a successful Apply.
+11. Git branches do not provide infrastructure isolation.
+12. Separate Terraform states are needed for independently managed environments.
+13. Least-privilege permissions and SHA-pinned actions improve CI/CD security.
+14. Infrastructure deployment should be observable, reviewable, and controlled.
+
+## 20. Final Result
+
+The project demonstrates a working Terraform CI/CD pipeline using GitHub Actions and Microsoft Azure.
+
+It includes Pull Request validation, reusable workflows, OIDC authentication, Azure remote state, saved plan artifacts, manual deployment approval, and controlled Terraform Apply execution.
+
+The final Plan and Apply tests completed successfully.
+
+**Lesson 11 – Final Terraform CI/CD Project: implementation completed and end-to-end deployment tested.**
