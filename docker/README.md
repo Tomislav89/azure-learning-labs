@@ -466,3 +466,327 @@ These concepts prepare us for:
 - Kubernetes PersistentVolumeClaims (PVC).
 - Azure Disk and Azure Files storage.
 - Stateful workloads in Azure Kubernetes Service (AKS).
+
+---
+
+## Lesson 4 – Docker Networking
+
+### Why Docker Networking Matters
+
+Docker networking allows containers to communicate with each
+other, with the Docker host, and with external services.
+
+A typical application may contain multiple components:
+
+- Frontend: receives requests from users.
+- Backend: processes application requests.
+- Database: stores application data.
+
+Docker networks allow us to control which containers share
+network connectivity.
+
+### Docker Network Drivers
+
+Docker supports several networking drivers.
+
+- bridge: commonly used for containers on one Docker host.
+- host: shares the Docker host's network namespace on Linux.
+- none: disables normal network connectivity.
+- overlay: supports networking across multiple Docker hosts,
+  commonly in Docker Swarm environments.
+
+In this lesson, we used user-defined bridge networks.
+
+### Lab 1 – Create and Inspect a Docker Network
+
+List existing networks:
+
+    docker network ls
+
+Create a user-defined bridge network:
+
+    docker network create devops-network
+
+Inspect its configuration:
+
+    docker network inspect devops-network
+
+Our Docker network received:
+
+    Network: 172.18.0.0/16
+    Gateway: 172.18.0.1
+    Driver: bridge
+
+Docker automatically allocated this subnet.
+
+The network initially contained no containers.
+
+### Lab 2 – Container-to-Container Communication
+
+Start two Alpine containers on the same network:
+
+    docker run -dit --name container-a \
+      --network devops-network alpine:latest sh
+
+    docker run -dit --name container-b \
+      --network devops-network alpine:latest sh
+
+List running containers:
+
+    docker ps
+
+Inspect their IP addresses:
+
+    docker inspect -f \
+      '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' \
+      container-a
+
+    docker inspect -f \
+      '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' \
+      container-b
+
+Observed IP addresses:
+
+    container-a: 172.18.0.2
+    container-b: 172.18.0.3
+
+Test communication:
+
+    docker exec container-a ping -c 4 container-b
+
+    docker exec container-b ping -c 4 container-a
+
+Both tests succeeded with 0% packet loss.
+
+### Docker DNS
+
+User-defined Docker bridge networks provide automatic
+container-name resolution through Docker's embedded DNS.
+
+For example:
+
+    docker exec container-a ping -c 4 container-b
+
+Docker resolves the name container-b to its IP address.
+
+Applications should generally use stable service names
+rather than hardcoded container IP addresses.
+
+Container IP addresses may change when containers are recreated.
+
+### Lab 3 – Network Separation
+
+Create a second network:
+
+    docker network create isolated-network
+
+Start another container:
+
+    docker run -dit --name container-c \
+      --network isolated-network alpine:latest sh
+
+Attempt to resolve container-c from container-a:
+
+    docker exec container-a ping -c 3 container-c
+
+Observed result:
+
+    ping: bad address 'container-c'
+
+The containers did not share a user-defined network,
+so container-a could not resolve container-c by name.
+
+Connect container-c to devops-network:
+
+    docker network connect devops-network container-c
+
+Repeat the test:
+
+    docker exec container-a ping -c 3 container-c
+
+The test succeeded with 0% packet loss.
+
+Container-c was reachable at 172.18.0.4.
+
+### Lab 4 – Multiple Networks per Container
+
+Inspect container-c:
+
+    docker inspect -f \
+      '{{json .NetworkSettings.Networks}}' container-c
+
+Display network names and IP addresses:
+
+    docker inspect -f \
+      '{{range $name, $network := .NetworkSettings.Networks}}{{printf "%s -> %s\n" $name $network.IPAddress}}{{end}}' \
+      container-c
+
+Observed results:
+
+    devops-network -> 172.18.0.4
+    isolated-network -> 172.19.0.2
+
+List containers connected to each network:
+
+    docker network inspect -f \
+      '{{range .Containers}}{{println .Name .IPv4Address}}{{end}}' \
+      devops-network
+
+    docker network inspect -f \
+      '{{range .Containers}}{{println .Name .IPv4Address}}{{end}}' \
+      isolated-network
+
+A container can have multiple network interfaces and IP
+addresses when connected to multiple Docker networks.
+
+Connecting a container to two networks does not automatically
+make it a router between those networks.
+
+
+### Lab 5 – Frontend, Backend and Database Networking
+
+We simulated a three-tier architecture using Alpine containers.
+
+Network design:
+
+    frontend-network:
+      frontend
+      backend
+
+    backend-network:
+      backend
+      database
+
+The backend container was connected to both networks.
+
+Create networks:
+
+    docker network create frontend-network
+    docker network create backend-network
+
+Start frontend:
+
+    docker run -dit --name frontend \
+      --network frontend-network alpine:latest sh
+
+Start backend:
+
+    docker run -dit --name backend \
+      --network frontend-network alpine:latest sh
+
+Connect backend to the second network:
+
+    docker network connect backend-network backend
+
+Start database:
+
+    docker run -dit --name database \
+      --network backend-network alpine:latest sh
+
+Test frontend-to-backend communication:
+
+    docker exec frontend ping -c 3 backend
+
+Result:
+
+    3 packets transmitted, 3 received, 0% packet loss
+
+Test backend-to-database communication:
+
+    docker exec backend ping -c 3 database
+
+Result:
+
+    3 packets transmitted, 3 received, 0% packet loss
+
+Test frontend-to-database name resolution:
+
+    docker exec frontend ping -c 3 database
+
+Result:
+
+    ping: bad address 'database'
+
+Frontend and database did not share a Docker network.
+
+This demonstrated Docker DNS visibility and network segmentation.
+
+Important: DNS resolution failure alone is not a complete
+network security test. Application connectivity should also
+be tested using the relevant TCP ports.
+
+### Docker Networking Cleanup
+
+Remove lab containers:
+
+    docker rm -f \
+      container-a \
+      container-b \
+      container-c \
+      frontend \
+      backend \
+      database
+
+Remove lab networks:
+
+    docker network rm \
+      devops-network \
+      isolated-network \
+      frontend-network \
+      backend-network
+
+Verify cleanup:
+
+    docker ps -a
+    docker network ls
+    docker volume ls
+
+After cleanup, only the standard Docker networks remained:
+
+    bridge
+    host
+    none
+
+The named volumes devops-data and minikube were preserved.
+
+### Important Docker Networking Principles
+
+1. Docker containers can communicate over shared networks.
+2. User-defined bridge networks provide embedded DNS.
+3. Container names can resolve to IP addresses on shared networks.
+4. Container IP addresses are not guaranteed to remain unchanged.
+5. One container can connect to multiple Docker networks.
+6. Each network connection can have its own IP address.
+7. Network separation helps reduce unnecessary connectivity.
+8. DNS failure does not by itself prove complete isolation.
+9. Published ports are different from internal container networking.
+10. Network configuration should follow least-privilege principles.
+
+### Connection to Azure and Kubernetes
+
+Docker networking provides useful foundations for understanding:
+
+- Azure Virtual Networks and subnets.
+- Network segmentation.
+- Kubernetes Pods and Services.
+- Kubernetes DNS-based service discovery.
+- Kubernetes NetworkPolicies.
+- Azure Kubernetes Service networking.
+
+Docker bridge networking and Azure Virtual Networks are
+different technologies, but they share important networking
+concepts.
+
+### Lesson 4 – Final Outcome
+
+Successfully completed:
+
+- Creating and inspecting Docker bridge networks.
+- Assigning containers to specific networks.
+- Inspecting container IP addresses.
+- Testing communication using Docker DNS.
+- Connecting running containers to additional networks.
+- Simulating frontend, backend and database segmentation.
+- Removing lab containers and networks safely.
+
+Next lesson: Docker Compose.
