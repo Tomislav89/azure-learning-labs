@@ -282,3 +282,187 @@ These concepts will later be used with:
 - Kubernetes for container orchestration.
 - Azure Kubernetes Service (AKS) for managed Kubernetes.
 - Terraform for provisioning the required Azure infrastructure.
+
+---
+
+## Lesson 3 – Docker Volumes and Persistent Storage
+
+### Why Persistent Storage Matters
+
+Containers have a writable layer that exists for the lifetime
+of the container.
+
+Stopping and restarting a container preserves its writable layer.
+
+Removing the container deletes that writable layer.
+
+Applications requiring persistent data should use appropriate
+external storage, such as Docker volumes or bind mounts.
+
+### Named Volumes
+
+Create a Docker-managed volume:
+
+    docker volume create devops-data
+
+List and inspect volumes:
+
+    docker volume ls
+    docker volume inspect devops-data
+
+In our environment, Docker reported this mountpoint:
+
+    /var/lib/docker/volumes/devops-data/_data
+
+The mountpoint is managed by Docker Engine.
+
+Start a container with the volume:
+
+    docker run -dit --name volume-lab \
+      -v devops-data:/data alpine:latest sh
+
+Write data:
+
+    docker exec volume-lab sh -c \
+      'echo "Hello from Docker Volume!" > /data/test.txt'
+
+Read data:
+
+    docker exec volume-lab cat /data/test.txt
+
+Remove the container:
+
+    docker stop volume-lab
+    docker rm volume-lab
+
+Read the same data from a new container:
+
+    docker run --rm --name volume-lab-new \
+      -v devops-data:/data alpine:latest cat /data/test.txt
+
+Result:
+
+    Hello from Docker Volume!
+
+The data survived because it was stored in the named volume,
+not in the removed container's writable layer.
+
+The --rm option automatically removes the temporary container
+when its main process exits. It does not remove the named volume.
+
+### Bind Mounts
+
+A bind mount maps a specific host directory into a container.
+
+Create a directory and file on the WSL2 host:
+
+    mkdir -p ~/workspace/docker-bind-lab
+
+    echo "Hello from WSL2 Host!" \
+      > ~/workspace/docker-bind-lab/message.txt
+
+Read the host file from a container:
+
+    docker run --rm --name bind-lab \
+      -v ~/workspace/docker-bind-lab:/data \
+      alpine:latest cat /data/message.txt
+
+Modify the host file from a container:
+
+    docker run --rm --name bind-lab \
+      -v ~/workspace/docker-bind-lab:/data \
+      alpine:latest \
+      sh -c 'echo "Modified from Docker Container!" > /data/message.txt'
+
+Verify on the host:
+
+    cat ~/workspace/docker-bind-lab/message.txt
+
+Result:
+
+    Modified from Docker Container!
+
+The host and container accessed the same underlying file.
+
+### Named Volume vs Bind Mount
+
+Named volume:
+
+    -v devops-data:/data
+
+Bind mount:
+
+    -v /home/tomislav/workspace/docker-bind-lab:/data
+
+Both provide access to data outside the container's writable layer.
+
+The main difference is storage management:
+
+- Named volume: Docker manages the storage location.
+- Bind mount: The user specifies the host directory.
+- Named volumes are commonly used for database persistence.
+- Bind mounts are commonly used for local development.
+
+### Container Writable Layer
+
+Start a container without a volume:
+
+    docker run -dit --name no-volume-lab alpine:latest sh
+
+Create a file:
+
+    docker exec no-volume-lab sh -c \
+      'echo "Important application data!" > /test.txt'
+
+Stop and restart the container:
+
+    docker stop no-volume-lab
+    docker start no-volume-lab
+
+Verify the file still exists:
+
+    docker exec no-volume-lab cat /test.txt
+
+Result:
+
+    Important application data!
+
+Remove the container:
+
+    docker stop no-volume-lab
+    docker rm no-volume-lab
+
+Start a new container:
+
+    docker run --rm --name no-volume-lab-new \
+      alpine:latest sh -c 'ls -l /test.txt'
+
+Result:
+
+    ls: /test.txt: No such file or directory
+
+The new container does not contain the deleted container's data.
+
+### Important Storage Principles
+
+1. docker stop does not delete container data.
+2. docker start reuses an existing container.
+3. docker rm deletes the container's writable layer.
+4. Named volumes survive normal container removal.
+5. Bind mounts use directories on the Docker host.
+6. Multiple containers can reuse the same named volume.
+7. Docker volumes are not automatically backed up.
+8. Deleting a volume can permanently delete its data.
+9. Persistent storage is essential for stateful applications.
+10. Kubernetes provides PersistentVolumes and
+    PersistentVolumeClaims for persistent storage management.
+
+### Connection to Azure and Kubernetes
+
+These concepts prepare us for:
+
+- PostgreSQL and other stateful containerized applications.
+- Kubernetes PersistentVolumes (PV).
+- Kubernetes PersistentVolumeClaims (PVC).
+- Azure Disk and Azure Files storage.
+- Stateful workloads in Azure Kubernetes Service (AKS).
