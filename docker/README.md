@@ -1211,3 +1211,619 @@ Important concepts:
 - `down` and `down -v` have different effects on persistent data.
 - Container startup and application readiness are different concepts.
 - Compose configurations can be version-controlled in Git.
+
+---
+
+# Lesson 6 – Docker Registry & Image Publishing
+
+## 1. Goal
+
+Learn how to publish a custom Docker image to a container registry and retrieve it for deployment.
+
+Topics covered:
+
+- Docker registries and repositories
+- Docker image naming conventions
+- Image tags and versioning
+- Docker Hub authentication
+- Publishing images with `docker push`
+- Reusing Docker image layers
+- Registry digests versus local Image IDs
+- Retrieving images with `docker pull`
+- Running an image retrieved from a registry
+- Container cleanup and image persistence
+
+## 2. What Is a Docker Registry?
+
+A Docker registry is a service that stores and distributes container images.
+
+Examples include:
+
+- Docker Hub
+- Azure Container Registry (ACR)
+- GitHub Container Registry (GHCR)
+- Amazon Elastic Container Registry (ECR)
+
+Docker Hub is the default registry used by Docker when no registry hostname is specified.
+
+A registry allows developers and CI/CD systems to share container images without rebuilding them on every deployment server.
+
+Typical workflow:
+
+```text
+Developer workstation
+        |
+        | docker build
+        v
+Local Docker image
+        |
+        | docker tag
+        v
+Registry-compatible image name
+        |
+        | docker push
+        v
+Docker Hub
+        |
+        | docker pull
+        v
+Deployment server
+        |
+        | docker run
+        v
+Running application
+```
+
+In production, this workflow can be automated through GitHub Actions, Azure DevOps Pipelines, or other CI/CD tools.
+
+## 3. Existing Docker Image
+
+We reused the custom Nginx image created in Lesson 2.
+
+Verify local images:
+
+```bash
+docker image ls
+```
+
+Relevant images:
+
+```text
+devops-nginx:v1
+devops-nginx:v2
+nginx:alpine
+```
+
+The Dockerfile from Lesson 2:
+
+```dockerfile
+FROM nginx:alpine
+
+COPY index.html /usr/share/nginx/html/index.html
+
+EXPOSE 80
+```
+
+Explanation:
+
+- `FROM nginx:alpine` selects the base image.
+- `COPY` adds our custom HTML page to the image.
+- `EXPOSE 80` documents the container's listening port.
+
+The `EXPOSE` instruction does not automatically publish a port on the host.
+
+The existing image was:
+
+```text
+devops-nginx:v2
+Image ID: 32bd9bf67c81
+```
+
+We reused this image instead of rebuilding it.
+
+## 4. Understanding Docker Image Names
+
+A Docker image reference commonly uses this format:
+
+```text
+[registry-host/]namespace/repository:tag
+```
+
+For our Docker Hub repository:
+
+```text
+tomislav1989/devops-nginx:v2
+```
+
+Components:
+
+| Component | Value | Purpose |
+|---|---|---|
+| Registry | docker.io | Docker Hub |
+| Namespace | tomislav1989 | Docker Hub account |
+| Repository | devops-nginx | Image repository |
+| Tag | v2 | Image version reference |
+
+The fully qualified reference is:
+
+```text
+docker.io/tomislav1989/devops-nginx:v2
+```
+
+If a tag is omitted, Docker normally uses `latest`.
+
+For example:
+
+```bash
+docker pull tomislav1989/devops-nginx
+```
+
+is interpreted as:
+
+```bash
+docker pull tomislav1989/devops-nginx:latest
+```
+
+However, `latest` does not automatically mean the newest application version.
+
+It is simply a tag that can be assigned to an image.
+
+For predictable deployments, explicit version tags or immutable digests are preferable.
+
+## 5. Docker Image Tagging
+
+We first created a temporary local tag:
+
+```bash
+docker tag devops-nginx:v2 registry-lab/devops-nginx:v2
+```
+
+Verify:
+
+```bash
+docker image ls
+```
+
+Both references had the same Image ID:
+
+```text
+devops-nginx:v2                 32bd9bf67c81
+registry-lab/devops-nginx:v2    32bd9bf67c81
+```
+
+We verified the full Image IDs:
+
+```bash
+docker image inspect devops-nginx:v2 --format '{{.Id}}'
+
+docker image inspect registry-lab/devops-nginx:v2 --format '{{.Id}}'
+```
+
+Both commands returned:
+
+```text
+sha256:32bd9bf67c81df589ab77eed0bfed46a34099f6ec4e27c8a98c15d3ab7a166fe
+```
+
+This proves that the two names refer to the same image.
+
+Important:
+
+`docker tag` does not rebuild the image or duplicate all of its layers.
+
+It creates another reference to the existing image.
+
+A separate `docker tag` command is unnecessary if the image was already built with the desired registry-compatible name.
+
+For example:
+
+```bash
+docker build -t tomislav1989/devops-nginx:v2 ./docker/dockerfile-lab
+```
+
+would build the image with the correct name directly.
+
+In our lab, we reused the existing image instead.
+
+## 6. Docker Hub Repository
+
+We created a separate Docker Hub repository for the learning project.
+
+Repository:
+
+```text
+tomislav1989/devops-nginx
+```
+
+Docker Hub URL:
+
+https://hub.docker.com/r/tomislav1989/devops-nginx
+
+The repository is separate from other application repositories.
+
+This helps keep learning projects organized and makes the published image easier to identify.
+
+## 7. Authentication to Docker Hub
+
+Authenticate using:
+
+```bash
+docker login --username tomislav1989
+```
+
+Observed result:
+
+```text
+Login Succeeded
+```
+
+Docker Hub supports Personal Access Tokens (PATs) for CLI authentication.
+
+Do not put passwords or tokens into README files, Git repositories, or shell scripts committed to Git.
+
+During the lab, Docker displayed this warning:
+
+```text
+WARNING! Your credentials are stored unencrypted in '/home/tomislav/.docker/config.json'.
+```
+
+This indicates that a credential helper was not configured.
+
+A credential helper is recommended for safer local credential storage.
+
+The Docker configuration file containing authentication data must not be committed to Git.
+
+## 8. Tagging for Docker Hub
+
+We added the Docker Hub repository name to the existing image:
+
+```bash
+docker tag devops-nginx:v2 tomislav1989/devops-nginx:v2
+```
+
+Verify:
+
+```bash
+docker image ls tomislav1989/devops-nginx
+```
+
+Observed Image ID:
+
+```text
+32bd9bf67c81
+```
+
+The image contents did not change.
+
+Only an additional image reference was created.
+
+## 9. Publishing with Docker Push
+
+Publish the image:
+
+```bash
+docker push tomislav1989/devops-nginx:v2
+```
+
+Observed output included:
+
+```text
+The push refers to repository [docker.io/tomislav1989/devops-nginx]
+
+0a8a679fd835: Pushed
+a0d10c4778f6: Mounted from library/nginx
+7c65737affdd: Mounted from library/nginx
+75f1d9657d88: Mounted from library/alpine
+```
+
+The final output was:
+
+```text
+v2: digest: sha256:36a0f49e5d41aeecf599a153d0e57293d1501c655eda93514c5fe842ec21897c size: 2196
+```
+
+Explanation:
+
+- `Pushed`: a layer was uploaded to Docker Hub.
+- `Mounted from library/nginx`: Docker Hub reused an existing compatible layer.
+- `Mounted from library/alpine`: another existing layer was reused.
+- `digest`: identifies the published image manifest.
+
+Docker images are composed of layers.
+
+Layers are content-addressed, allowing registries to reuse identical data instead of uploading it repeatedly.
+
+Our image was based on `nginx:alpine`, so many of its layers were already available in Docker Hub.
+
+The custom application layer needed to be uploaded.
+
+This layer-reuse mechanism reduces unnecessary network transfer and storage duplication.
+
+## 10. Local Image ID Versus Registry Digest
+
+Local Image ID:
+
+```text
+sha256:32bd9bf67c81df589ab77eed0bfed46a34099f6ec4e27c8a98c15d3ab7a166fe
+```
+
+Registry digest:
+
+```text
+sha256:36a0f49e5d41aeecf599a153d0e57293d1501c655eda93514c5fe842ec21897c
+```
+
+These values are different because they identify different objects.
+
+The local Image ID identifies the image configuration.
+
+The registry digest identifies the published manifest, or an image index in some multi-platform scenarios.
+
+A tag such as `v2` is a human-readable reference and can potentially be reassigned.
+
+A digest identifies specific registry content.
+
+For deployments that must use exactly the same published image, a digest reference can be used:
+
+```text
+tomislav1989/devops-nginx@sha256:36a0f49e5d41aeecf599a153d0e57293d1501c655eda93514c5fe842ec21897c
+```
+
+This is especially useful in production CI/CD pipelines.
+
+## 11. Removing a Local Image Tag
+
+To simulate retrieving the image from a registry, we removed its Docker Hub tag locally:
+
+```bash
+docker image rm tomislav1989/devops-nginx:v2
+```
+
+Observed output:
+
+```text
+Untagged: tomislav1989/devops-nginx:v2
+Untagged: tomislav1989/devops-nginx@sha256:36a0f49e5d41aeecf599a153d0e57293d1501c655eda93514c5fe842ec21897c
+```
+
+The underlying image remained available through other tags:
+
+```text
+devops-nginx:v2
+registry-lab/devops-nginx:v2
+```
+
+Both references pointed to Image ID:
+
+```text
+32bd9bf67c81
+```
+
+Removing a local tag does not delete the published image from Docker Hub.
+
+It also does not necessarily remove image layers if other local references still use them.
+
+## 12. Retrieving the Image with Docker Pull
+
+Download the published image:
+
+```bash
+docker pull tomislav1989/devops-nginx:v2
+```
+
+Observed output:
+
+```text
+v2: Pulling from tomislav1989/devops-nginx
+
+Digest: sha256:36a0f49e5d41aeecf599a153d0e57293d1501c655eda93514c5fe842ec21897c
+
+Status: Downloaded newer image for tomislav1989/devops-nginx:v2
+```
+
+Verify:
+
+```bash
+docker image ls tomislav1989/devops-nginx
+
+docker image inspect tomislav1989/devops-nginx:v2 --format '{{.Id}}'
+```
+
+Observed Image ID:
+
+```text
+sha256:32bd9bf67c81df589ab77eed0bfed46a34099f6ec4e27c8a98c15d3ab7a166fe
+```
+
+The Image ID matched the original local image.
+
+This confirms that the published image could be retrieved through Docker Hub.
+
+Because the same image layers were still available locally, Docker did not necessarily need to download every layer again.
+
+A separate machine with no cached layers would provide a more independent download test.
+
+## 13. Running the Published Image
+
+Start a container using the Docker Hub image reference:
+
+```bash
+docker run -d \
+  --name registry-nginx-test \
+  -p 8081:80 \
+  tomislav1989/devops-nginx:v2
+```
+
+Explanation:
+
+- `-d`: run in detached mode.
+- `--name`: assign a readable container name.
+- `-p 8081:80`: map host port 8081 to container port 80.
+- `tomislav1989/devops-nginx:v2`: image reference.
+
+We used port 8081 to avoid conflicts with previous labs using port 8080.
+
+Verify:
+
+```bash
+docker ps --filter name=registry-nginx-test
+```
+
+Observed result:
+
+```text
+STATUS: Up
+PORTS: 0.0.0.0:8081->80/tcp
+NAME: registry-nginx-test
+```
+
+Test the application:
+
+```bash
+curl http://localhost:8081
+```
+
+Observed HTML:
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Docker DevOps Lab</title>
+</head>
+<body>
+    <h1>My Docker Image - Version 2</h1>
+    <p>This website is running inside my own Docker container.</p>
+    <p>Azure / DevOps Learning Roadmap</p>
+</body>
+</html>
+```
+
+The application served the expected Version 2 content.
+
+This confirms that the published image could be retrieved and used to start a functioning container.
+
+## 14. Inspecting Container Logs
+
+Check the logs:
+
+```bash
+docker logs --tail 20 registry-nginx-test
+```
+
+The Nginx logs showed successful initialization and an HTTP request:
+
+```text
+"GET / HTTP/1.1" 200 286
+```
+
+Explanation:
+
+- `GET /`: HTTP request for the website root.
+- `200`: successful HTTP response.
+- `286`: response body size in bytes.
+
+The logs confirm that Nginx started and served the requested page.
+
+In real deployments, logs are an important troubleshooting source.
+
+## 15. Final Cleanup
+
+Stop the test container:
+
+```bash
+docker stop registry-nginx-test
+```
+
+Remove it:
+
+```bash
+docker rm registry-nginx-test
+```
+
+Verify:
+
+```bash
+docker ps -a --filter name=registry-nginx-test
+```
+
+The command returned no matching containers.
+
+Check that the image remains available:
+
+```bash
+docker image ls tomislav1989/devops-nginx
+```
+
+Observed result:
+
+```text
+tomislav1989/devops-nginx:v2   32bd9bf67c81
+```
+
+The test container was removed, but the image remained locally available.
+
+The published image also remained available on Docker Hub.
+
+This demonstrates the separation between:
+
+- Containers
+- Local images
+- Registry-hosted images
+
+## 16. How This Connects to CI/CD
+
+A typical CI/CD workflow for a containerized application looks like this:
+
+```text
+Developer pushes code to GitHub
+              |
+              v
+GitHub Actions workflow starts
+              |
+              v
+Application tests run
+              |
+              v
+Docker image is built
+              |
+              v
+Image is tagged with a version or commit SHA
+              |
+              v
+Image is pushed to a container registry
+              |
+              v
+Deployment environment pulls the image
+              |
+              v
+Application is deployed
+```
+
+In our future Azure/DevOps labs, we will extend this workflow with:
+
+- GitHub Actions
+- Azure Container Registry
+- Automated image builds
+- Secure registry authentication
+- Deployment automation
+- Kubernetes
+
+The core principles remain the same regardless of the registry provider.
+
+## 17. Key Takeaways
+
+- A Docker registry stores and distributes container images.
+- Docker Hub is Docker's default public registry.
+- Docker image names include a repository and an optional explicit tag.
+- `docker tag` creates another reference to an existing image.
+- `docker login` authenticates the Docker CLI to a registry.
+- `docker push` publishes an image to a registry.
+- Registries can reuse existing image layers.
+- A local Image ID and a registry digest identify different objects.
+- Tags can change; digests identify specific published content.
+- `docker pull` retrieves an image from a registry.
+- Removing a local tag does not delete the registry-hosted image.
+- Removing a container does not automatically delete its image.
+- Image publishing is a fundamental step in CI/CD pipelines.
