@@ -790,3 +790,424 @@ Successfully completed:
 - Removing lab containers and networks safely.
 
 Next lesson: Docker Compose.
+
+---
+
+# Lesson 5 – Docker Compose
+
+## 1. Goal
+
+Learn how to define, run, manage, and troubleshoot multi-container applications using Docker Compose.
+
+Topics covered:
+- Docker Compose V2 installation
+- YAML configuration and services
+- Container lifecycle management
+- Default networks and Docker DNS
+- Named volumes and persistent storage
+- Data preservation and deletion
+- Container startup versus application readiness
+
+## 2. Docker Compose Installation
+
+Environment:
+- Ubuntu 22.04 LTS on WSL2
+- Docker Engine 29.1.3
+- Docker Compose V2 2.40.3
+- Docker Buildx 0.30.1
+
+Install the plugins from Ubuntu repositories:
+
+```bash
+sudo apt install -y docker-compose-v2 docker-buildx
+```
+
+Verify the installation:
+
+```bash
+docker compose version
+docker buildx version
+docker --version
+docker info --format '{{.ServerVersion}}'
+docker ps
+```
+
+Docker Compose defines and manages containerized applications through a YAML configuration file.
+
+Instead of manually creating each container, network, and volume, we declare the desired application configuration and let Compose manage the resources.
+
+Docker Buildx provides extended image-building functionality through BuildKit.
+
+## 3. First Compose Project
+
+Create the project directory:
+
+```bash
+cd ~/workspace/azure-learning-labs
+mkdir -p docker/compose-lab
+cd docker/compose-lab
+```
+
+Initial `compose.yaml`:
+
+```yaml
+services:
+  web:
+    image: nginx:alpine
+    ports:
+      - "8080:80"
+```
+
+Explanation:
+
+- `services`: defines the application's services.
+- `web`: logical service name.
+- `image`: Docker image used to create the container.
+- `ports`: publishes a container port on the host.
+- `8080:80`: host port 8080 maps to container port 80.
+
+Validate the configuration:
+
+```bash
+docker compose config
+```
+
+This command parses and normalizes the Compose configuration.
+
+It may display additional settings such as the default network and expanded port mappings.
+
+It does not start containers or create Docker resources.
+
+Start the application:
+
+```bash
+docker compose up -d
+```
+
+The `up` command creates and starts the services. The `-d` option runs them in detached mode.
+
+Verify:
+
+```bash
+docker compose ps
+curl -I http://localhost:8080
+docker network ls
+```
+
+Observed results:
+
+- Container `compose-lab-web-1` started.
+- Nginx returned HTTP 200 OK.
+- Network `compose-lab_default` was created automatically.
+
+Compose generally uses the project name as a prefix when naming its resources.
+
+## 4. Compose Application Lifecycle
+
+Stop the application:
+
+```bash
+docker compose stop
+docker compose ps -a
+docker network ls
+```
+
+`stop` stops the containers but preserves them and their network.
+
+Restart existing containers:
+
+```bash
+docker compose start
+docker compose ps
+```
+
+`start` starts existing containers without recreating them.
+
+Remove the application:
+
+```bash
+docker compose down
+docker compose ps -a
+docker network ls
+```
+
+`down` removes the project's containers and default networks.
+
+It does not remove named volumes by default.
+
+| Command | Behavior |
+|---|---|
+| `docker compose up -d` | Creates or updates and starts services |
+| `docker compose stop` | Stops existing containers |
+| `docker compose start` | Starts existing containers |
+| `docker compose ps` | Lists project containers |
+| `docker compose down` | Removes project containers and networks |
+| `docker compose down -v` | Also removes declared named volumes and anonymous volumes |
+
+## 5. Multiple Services and Docker DNS
+
+Extend `compose.yaml`:
+
+```yaml
+services:
+  web:
+    image: nginx:alpine
+    ports:
+      - "8080:80"
+
+  client:
+    image: alpine:latest
+    command: sleep infinity
+```
+
+The `client` service uses Alpine Linux.
+
+`sleep infinity` keeps the container running so we can execute commands inside it.
+
+Validate and start:
+
+```bash
+docker compose config
+docker compose up -d
+docker compose ps
+```
+
+Test communication between services:
+
+```bash
+docker compose exec client wget -qO- http://web
+```
+
+Explanation:
+
+1. `docker compose exec client` executes a command inside the running Alpine container.
+2. `wget` sends an HTTP request to `http://web`.
+3. Docker DNS resolves the service name `web` to the Nginx container's IP address.
+4. Nginx returns its HTML page.
+
+The service name is used instead of a hardcoded IP address.
+
+Communication between the containers uses Nginx's internal port 80. The published host port 8080 is not needed for this connection.
+
+Inspect the network:
+
+```bash
+docker network inspect compose-lab_default
+```
+
+Observed addresses:
+
+- `compose-lab-client-1`: `172.18.0.2`
+- `compose-lab-web-1`: `172.18.0.3`
+
+These IP addresses are dynamically assigned and can change after recreation.
+
+Both containers were connected to the automatically created `compose-lab_default` bridge network.
+
+## 6. Persistent Storage with Named Volumes
+
+Final `compose.yaml`:
+
+```yaml
+services:
+  web:
+    image: nginx:alpine
+    ports:
+      - "8080:80"
+    volumes:
+      - web-data:/usr/share/nginx/html
+
+  client:
+    image: alpine:latest
+    command: sleep infinity
+
+volumes:
+  web-data:
+```
+
+There are two different uses of `volumes`:
+
+1. The service-level `volumes` section mounts storage into the container.
+2. The top-level `volumes` section declares the named volume managed by Compose.
+
+The mapping:
+
+```yaml
+- web-data:/usr/share/nginx/html
+```
+
+means:
+
+- `web-data`: logical Docker volume name.
+- `/usr/share/nginx/html`: directory inside the Nginx container.
+
+Compose creates a Docker volume named `compose-lab_web-data`.
+
+This is Docker-managed storage, not a directory inside the Git repository.
+
+Validate and start:
+
+```bash
+docker compose config
+docker compose up -d
+docker compose ps
+docker volume ls
+```
+
+The lab confirmed that Compose created the volume and attached it to the Nginx container.
+
+## 7. Writing Data to the Volume
+
+Write a custom HTML page:
+
+```bash
+docker compose exec web sh -c \
+  'echo "<h1>Docker Compose Persistent Storage Works!</h1>" > /usr/share/nginx/html/index.html'
+```
+
+Explanation:
+
+- `docker compose exec web`: executes a command in the running Nginx container.
+- `sh -c`: executes the quoted command through a shell.
+- `echo`: produces the HTML content.
+- `>`: writes the content to the file, replacing its previous contents.
+- `/usr/share/nginx/html/index.html`: file inside the mounted volume.
+
+Verify:
+
+```bash
+curl http://localhost:8080
+```
+
+Observed response:
+
+```html
+<h1>Docker Compose Persistent Storage Works!</h1>
+```
+
+Although the file is accessed through the container filesystem, the data is stored in the Docker named volume.
+
+## 8. Persistence After Container Removal
+
+Remove the Compose application:
+
+```bash
+docker compose down
+```
+
+Check the volumes:
+
+```bash
+docker volume ls
+```
+
+The lab confirmed that `compose-lab_web-data` remained available.
+
+Recreate the application:
+
+```bash
+docker compose up -d
+```
+
+Verify the HTML content:
+
+```bash
+curl http://localhost:8080
+```
+
+The custom HTML content remained available because the new container mounted the existing volume.
+
+This demonstrates that named volume data is independent of the container lifecycle.
+
+During the lab, the first HTTP request immediately after recreation returned:
+
+```text
+curl: (56) Recv failure: Connection reset by peer
+```
+
+A later request succeeded, and the Nginx logs showed:
+
+```text
+"GET / HTTP/1.1" 200 50
+```
+
+This is consistent with the application not yet being ready when the first request was sent, although the output alone does not prove the exact cause.
+
+A running container does not necessarily mean its application is ready to serve requests.
+
+In production, application readiness can be monitored using health checks.
+
+## 9. Removing Persistent Data
+
+Remove containers, networks, and volumes:
+
+```bash
+docker compose down -v
+docker volume ls
+```
+
+The lab confirmed that `compose-lab_web-data` was removed.
+
+Existing unrelated volumes, including `devops-data` and `minikube`, remained available.
+
+Recreate the application:
+
+```bash
+docker compose up -d
+```
+
+Verify:
+
+```bash
+curl http://localhost:8080
+```
+
+The original Nginx welcome page appeared:
+
+```html
+<h1>Welcome to nginx!</h1>
+```
+
+The custom HTML content was no longer available because its volume had been deleted.
+
+When a new empty named volume is mounted over a non-empty directory in the image, Docker normally copies the directory's initial contents into that volume.
+
+Important distinction:
+
+- `docker compose down` preserves named volumes.
+- `docker compose down -v` removes declared named volumes and anonymous volumes attached to the project's containers.
+
+Be careful with `down -v`, especially when working with databases and other stateful applications.
+
+## 10. Final Cleanup
+
+Clean up the Compose lab:
+
+```bash
+docker compose down -v
+docker compose ps -a
+docker volume ls
+```
+
+Verified results:
+
+- Both Compose containers removed.
+- Compose network removed.
+- Compose named volume removed.
+- Existing `devops-data` and `minikube` volumes preserved.
+- `compose.yaml` retained for version control.
+
+## 11. Key Takeaways
+
+Docker Compose provides a declarative way to manage containerized applications.
+
+Important concepts:
+
+- Application services are defined in `compose.yaml`.
+- Compose creates and manages containers and networks.
+- Services can communicate using Docker DNS and service names.
+- Published host ports are separate from internal container ports.
+- Named volumes preserve data independently of containers.
+- `down` and `down -v` have different effects on persistent data.
+- Container startup and application readiness are different concepts.
+- Compose configurations can be version-controlled in Git.

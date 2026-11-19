@@ -1,0 +1,14 @@
+services:
+  web:
+    image: nginx:alpine
+    ports:
+      - "8080:80"
+    volumes:
+      - web-data:/usr/share/nginx/html
+
+  client:
+    image: alpine:latest
+    command: sleep infinity
+
+volumes:
+  web-data:
