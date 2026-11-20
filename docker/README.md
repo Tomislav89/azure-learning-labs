@@ -1827,3 +1827,820 @@ The core principles remain the same regardless of the registry provider.
 - Removing a local tag does not delete the registry-hosted image.
 - Removing a container does not automatically delete its image.
 - Image publishing is a fundamental step in CI/CD pipelines.
+
+---
+
+# Lesson 7 – Docker Multi-stage Builds, .dockerignore & Image Optimization
+
+## 1. Lesson Objectives
+
+This lesson demonstrates how to build smaller, more efficient Docker images by separating application compilation from the final runtime environment.
+
+Topics covered:
+
+- Docker build context
+- Dockerfile instruction order
+- Image names and tags
+- Single-stage builds
+- The `.dockerignore` file
+- Multi-stage builds
+- Go application compilation
+- Image size optimization
+- Docker image layers and history
+- Runtime validation
+- Container cleanup
+
+The practical lab uses a small Go HTTP application.
+
+The application is compiled inside Docker, so Go does not need to be installed on the host machine.
+
+## 2. Lab Directory Structure
+
+Project directory:
+
+```text
+docker/multistage-lab/
+├── .dockerignore
+├── Dockerfile.single
+├── Dockerfile.multi
+├── debug.log
+├── go.mod
+└── main.go
+```
+
+File responsibilities:
+
+| File | Purpose |
+|---|---|
+| `main.go` | Go HTTP application source code |
+| `go.mod` | Go module definition |
+| `debug.log` | Demonstrates exclusion from the build context |
+| `.dockerignore` | Defines files excluded from the Docker build context |
+| `Dockerfile.single` | Single-stage image definition |
+| `Dockerfile.multi` | Multi-stage image definition |
+
+## 3. Docker Build Context
+
+The build context is the collection of files available to Docker during an image build.
+
+Example:
+
+```bash
+docker build -f Dockerfile.single -t devops-go:single .
+```
+
+Command breakdown:
+
+| Argument | Meaning |
+|---|---|
+| `docker build` | Builds a Docker image |
+| `-f Dockerfile.single` | Selects the Dockerfile |
+| `-t devops-go:single` | Assigns the image name and tag |
+| `.` | Uses the current directory as the build context |
+
+The final dot is particularly important.
+
+When executed from `docker/multistage-lab`, Docker uses that directory as the build context.
+
+The build context is not the same as the final Docker image.
+
+A file can be available during the build without necessarily being copied into the final image.
+
+For example:
+
+```dockerfile
+COPY . .
+```
+
+copies all non-excluded files from the build context into the current working directory inside the image.
+
+By contrast:
+
+```dockerfile
+COPY main.go .
+```
+
+copies only `main.go`.
+
+The first dot in `COPY . .` identifies the source within the build context.
+
+The second dot identifies the destination inside the image, relative to `WORKDIR`.
+
+## 4. Go HTTP Application
+
+File: `main.go`
+
+```go
+package main
+
+import (
+    "fmt"
+    "log"
+    "net/http"
+)
+
+func main() {
+    http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+        fmt.Fprintln(w, "Hello from Docker Multi-stage Build Lab!")
+    })
+
+    log.Println("Server listening on port 8080")
+
+    log.Fatal(http.ListenAndServe(":8080", nil))
+}
+```
+
+Explanation:
+
+- `package main` defines an executable Go program.
+- `net/http` provides HTTP server functionality.
+- `http.HandleFunc("/")` registers a handler for the root URL.
+- `fmt.Fprintln` writes the response to the HTTP client.
+- `http.ListenAndServe(":8080", nil)` starts the HTTP server on port 8080.
+- `log.Fatal` reports a server error and terminates the application.
+
+Expected HTTP response:
+
+```text
+Hello from Docker Multi-stage Build Lab!
+```
+
+File: `go.mod`
+
+```go
+module example.com/devops/multistage-lab
+
+go 1.23
+```
+
+The application uses only the Go standard library and requires no external Go dependencies.
+
+## 5. Single-stage Dockerfile
+
+File: `Dockerfile.single`
+
+```dockerfile
+FROM golang:1.23-alpine
+
+WORKDIR /app
+
+COPY . .
+
+RUN go build -o server .
+
+EXPOSE 8080
+
+CMD ["./server"]
+```
+
+Instruction breakdown:
+
+### FROM
+
+```dockerfile
+FROM golang:1.23-alpine
+```
+
+Selects the base image containing the Go compiler and supporting build environment.
+
+### WORKDIR
+
+```dockerfile
+WORKDIR /app
+```
+
+Sets `/app` as the working directory for subsequent instructions.
+
+If the directory does not exist, Docker creates it.
+
+### COPY
+
+```dockerfile
+COPY . .
+```
+
+Copies the available build context files into `/app`.
+
+Without `.dockerignore`, this also copies unnecessary files such as `debug.log`.
+
+### RUN
+
+```dockerfile
+RUN go build -o server .
+```
+
+Compiles the Go application during image creation.
+
+Command breakdown:
+
+- `go build` compiles the Go application.
+- `-o server` names the generated executable `server`.
+- `.` selects the Go package in the current directory.
+
+The generated executable is stored at `/app/server` inside the image.
+
+It is not automatically created in the host's project directory.
+
+### EXPOSE
+
+```dockerfile
+EXPOSE 8080
+```
+
+Documents that the application listens on port 8080.
+
+`EXPOSE` does not automatically publish the port to the host.
+
+Port publishing requires a command such as:
+
+```bash
+docker run -p 8082:8080 devops-go:single
+```
+
+### CMD
+
+```dockerfile
+CMD ["./server"]
+```
+
+Defines the default command executed when the container starts.
+
+Because `WORKDIR` is `/app`, the command runs `/app/server`.
+
+A command supplied after the image name in `docker run` overrides this default `CMD`.
+
+Example:
+
+```bash
+docker run --rm devops-go:single ls -la /app
+```
+
+This executes `ls -la /app` instead of starting the HTTP server.
+
+## 6. Dockerfile Instruction Order
+
+Dockerfile instructions are processed sequentially.
+
+Instruction order matters when later operations depend on earlier ones.
+
+For this application, the logical order is:
+
+```text
+FROM
+  |
+WORKDIR
+  |
+COPY
+  |
+RUN
+  |
+EXPOSE
+  |
+CMD
+```
+
+For example, the source code must be copied before running `go build`.
+
+Otherwise, the compiler will not find the application source files.
+
+However, not every instruction has a fixed mandatory position.
+
+For example, `EXPOSE 8080` could appear earlier without changing how the application is compiled.
+
+Instruction order also affects Docker build caching.
+
+Changes to an earlier instruction or its inputs can invalidate the cache for subsequent build steps.
+
+Production Dockerfiles are often organized to maximize cache reuse.
+
+## 7. Building the Single-stage Image
+
+Build command:
+
+```bash
+cd ~/workspace/azure-learning-labs/docker/multistage-lab
+
+docker build \
+  -f Dockerfile.single \
+  -t devops-go:single \
+  .
+```
+
+Inspect the image:
+
+```bash
+docker image ls devops-go
+```
+
+Inspect files inside the image:
+
+```bash
+docker run --rm devops-go:single ls -la /app
+```
+
+Observed files:
+
+```text
+Dockerfile.single
+debug.log
+go.mod
+main.go
+server
+```
+
+The `server` file is the compiled executable.
+
+The `debug.log` file is unnecessary for the application but was copied because of `COPY . .`.
+
+Observed single-stage image size:
+
+```text
+327 MB
+```
+
+This image includes the Go compiler, build environment, source code and compiled application.
+
+## 8. The .dockerignore File
+
+The `.dockerignore` file excludes matching files from the Docker build context.
+
+File: `.dockerignore`
+
+```dockerignore
+debug.log
+.git
+*.tmp
+```
+
+Rules:
+
+| Pattern | Meaning |
+|---|---|
+| `debug.log` | Excludes the debug log |
+| `.git` | Excludes Git metadata when present within the context |
+| `*.tmp` | Excludes matching temporary files |
+
+The `.dockerignore` file does not delete files from the host filesystem.
+
+It only controls which files are available in the Docker build context.
+
+It can improve build efficiency and help prevent unnecessary files from entering images.
+
+However, `.dockerignore` is not a substitute for proper secrets management.
+
+Passwords, access tokens and private keys should not be embedded in Docker images.
+
+## 9. Building the Image with .dockerignore
+
+Build a new image using the same single-stage Dockerfile:
+
+```bash
+docker build \
+  -f Dockerfile.single \
+  -t devops-go:ignored \
+  .
+```
+
+Inspect the image:
+
+```bash
+docker run --rm devops-go:ignored ls -la /app
+```
+
+Observed files:
+
+```text
+.dockerignore
+Dockerfile.single
+go.mod
+main.go
+server
+```
+
+The `debug.log` file is no longer present.
+
+This demonstrates that `.dockerignore` excluded the file before `COPY . .` was executed.
+
+The `.dockerignore` file itself remained available in the context and was copied by `COPY . .`.
+
+Compare the image sizes:
+
+```bash
+docker image ls devops-go
+```
+
+Observed results:
+
+| Image | Size |
+|---|---:|
+| `devops-go:single` | 327 MB |
+| `devops-go:ignored` | 327 MB |
+
+Excluding a small text file did not significantly reduce image size.
+
+The Go compiler and build environment were still present.
+
+This motivates using a multi-stage build.
+
+## 10. Multi-stage Builds
+
+A multi-stage Dockerfile contains multiple `FROM` instructions.
+
+Each `FROM` starts a new build stage.
+
+The main purpose is to separate application compilation from the final runtime environment.
+
+In this lab:
+
+1. The builder stage compiles the Go application.
+2. The runtime stage starts from a smaller Alpine image.
+3. Only the compiled executable is copied into the final image.
+
+The final image does not include the Go compiler or application source files.
+
+## 11. Multi-stage Dockerfile
+
+File: `Dockerfile.multi`
+
+```dockerfile
+# Stage 1 - Build the application
+FROM golang:1.23-alpine AS builder
+
+WORKDIR /app
+
+COPY go.mod main.go ./
+
+RUN CGO_ENABLED=0 go build -o server .
+
+# Stage 2 - Run the application
+FROM alpine:3.21
+
+WORKDIR /app
+
+COPY --from=builder /app/server ./server
+
+EXPOSE 8080
+
+CMD ["./server"]
+```
+
+### Builder stage
+
+```dockerfile
+FROM golang:1.23-alpine AS builder
+```
+
+Uses the Go base image and names the stage `builder`.
+
+The stage name is referenced later when copying the compiled executable.
+
+```dockerfile
+COPY go.mod main.go ./
+```
+
+Copies only the files needed to build this application.
+
+Unlike `COPY . .`, this does not copy unrelated project files.
+
+```dockerfile
+RUN CGO_ENABLED=0 go build -o server .
+```
+
+Compiles the Go application with CGO disabled.
+
+For this simple application, this allows the executable to run without external C library dependencies.
+
+### Runtime stage
+
+```dockerfile
+FROM alpine:3.21
+```
+
+Starts a new stage using a smaller Alpine Linux image.
+
+The Go compiler is not included in this runtime base image.
+
+```dockerfile
+COPY --from=builder /app/server ./server
+```
+
+Copies the compiled executable from the builder stage into the runtime stage.
+
+This is the key multi-stage instruction.
+
+The source is `/app/server` inside the builder stage.
+
+The destination is `./server`, relative to `/app` in the runtime stage.
+
+The final image contains the compiled application and the Alpine runtime filesystem.
+
+## 12. Building the Multi-stage Image
+
+Build command:
+
+```bash
+docker build \
+  -f Dockerfile.multi \
+  -t devops-go:multi \
+  .
+```
+
+Compare images:
+
+```bash
+docker image ls devops-go
+```
+
+Observed results:
+
+| Image | Image ID | Size |
+|---|---|---:|
+| `devops-go:single` | `d87b92699efa` | 327 MB |
+| `devops-go:ignored` | `2a068f33d297` | 327 MB |
+| `devops-go:multi` | `ac833194a637` | 15.3 MB |
+
+Inspect the runtime application directory:
+
+```bash
+docker run --rm devops-go:multi ls -la /app
+```
+
+Observed result:
+
+```text
+/app/
+└── server
+```
+
+The final image does not contain:
+
+- `main.go`
+- `go.mod`
+- `debug.log`
+- `Dockerfile.single`
+- Go compiler and build tools
+
+Only the compiled application is present in `/app`.
+
+The Alpine base image still provides its own runtime filesystem and utilities.
+
+## 13. Image Size Optimization Results
+
+The single-stage image was approximately:
+
+```text
+327 MB
+```
+
+The multi-stage image was approximately:
+
+```text
+15.3 MB
+```
+
+Approximate size reduction:
+
+```text
+327 MB - 15.3 MB = 311.7 MB
+```
+
+Percentage reduction:
+
+```text
+(327 - 15.3) / 327 * 100 = 95.3%
+```
+
+The multi-stage image is approximately 95.3% smaller.
+
+Benefits of smaller images may include:
+
+- Reduced image transfer times
+- Lower storage requirements
+- Faster image distribution
+- Fewer unnecessary packages
+- Reduced potential attack surface
+
+A smaller image is not automatically secure.
+
+Image security also depends on base image maintenance, dependency vulnerabilities, runtime permissions, secrets management and other controls.
+
+## 14. Running and Testing the Multi-stage Application
+
+Start the container:
+
+```bash
+docker run -d \
+  --name devops-go-multi-test \
+  -p 8082:8080 \
+  devops-go:multi
+```
+
+Arguments:
+
+| Argument | Meaning |
+|---|---|
+| `-d` | Runs the container in detached mode |
+| `--name` | Assigns a container name |
+| `-p 8082:8080` | Maps host port 8082 to container port 8080 |
+| `devops-go:multi` | Selects the optimized image |
+
+Check container status:
+
+```bash
+docker ps --filter name=devops-go-multi-test
+```
+
+Observed status:
+
+```text
+Up
+```
+
+Test the HTTP endpoint:
+
+```bash
+curl http://localhost:8082
+```
+
+Observed response:
+
+```text
+Hello from Docker Multi-stage Build Lab!
+```
+
+Check application logs:
+
+```bash
+docker logs devops-go-multi-test
+```
+
+Observed output:
+
+```text
+2026/11/20 09:51:15 Server listening on port 8080
+```
+
+This confirms that the application runs successfully in the final Alpine-based image without the Go compiler.
+
+## 15. Understanding Docker Image Layers
+
+Docker images are composed of filesystem layers and image metadata.
+
+Instructions such as `COPY` and `RUN` can create filesystem layers.
+
+Instructions such as `CMD`, `EXPOSE` and `WORKDIR` generally update metadata and may show a size of `0B` in image history.
+
+Inspect the single-stage image:
+
+```bash
+docker history --human devops-go:single
+```
+
+Important observed history entries:
+
+| History entry | Size |
+|---|---:|
+| Go base image layer | 237 MB |
+| `RUN go build -o server .` | 80.5 MB |
+| `COPY . .` | 564 B |
+| Alpine base layer | 8.31 MB |
+
+The Go build step added significantly more data than the final executable alone.
+
+This can include compiler-generated intermediate build artifacts and caches.
+
+Inspect the multi-stage image:
+
+```bash
+docker history --human devops-go:multi
+```
+
+Important observed history entries:
+
+| History entry | Size |
+|---|---:|
+| Alpine base layer | 7.79 MB |
+| `COPY /app/server ./server` | 7.46 MB |
+| `WORKDIR /app` | 0 B |
+| `EXPOSE 8080` | 0 B |
+| `CMD ["./server"]` | 0 B |
+
+The final image does not contain the Go builder stage layers.
+
+The builder stage is used during compilation, but its filesystem is not included in the final runtime image.
+
+The `<missing>` entries displayed by `docker history` are normal and do not mean that the image layers are missing or broken.
+
+## 16. Container Cleanup
+
+Stop the test container:
+
+```bash
+docker stop devops-go-multi-test
+```
+
+Remove the container:
+
+```bash
+docker rm devops-go-multi-test
+```
+
+Verify cleanup:
+
+```bash
+docker ps -a --filter name=devops-go-multi-test
+```
+
+Observed result:
+
+```text
+CONTAINER ID   IMAGE   COMMAND   CREATED   STATUS   PORTS   NAMES
+```
+
+No matching container remained.
+
+The Docker images were retained for comparison.
+
+The `--rm` option can also be used with `docker run` to automatically remove a container after it exits.
+
+Example:
+
+```bash
+docker run --rm devops-go:multi ls -la /app
+```
+
+This removes the temporary container but does not delete the Docker image.
+
+## 17. Production Considerations
+
+The lab demonstrates important optimization techniques, but a production-ready Docker image requires additional considerations.
+
+Recommended practices include:
+
+- Use maintained and supported base images.
+- Pin image versions or digests when reproducibility is important.
+- Regularly rebuild images to receive security updates.
+- Use `.dockerignore` to exclude unnecessary files.
+- Copy only the files needed for each build stage.
+- Separate build dependencies from runtime dependencies.
+- Prefer running applications as a non-root user where practical.
+- Avoid embedding secrets in Dockerfiles or image layers.
+- Scan images for known vulnerabilities.
+- Use automated image builds in CI/CD pipelines.
+- Validate that the application runs correctly in the final runtime image.
+
+The Go and Alpine image versions used in this lab are recorded for reproducibility of the exercise, not as a recommendation to use those exact versions indefinitely.
+
+## 18. CI/CD Relevance
+
+Multi-stage builds are especially useful in automated delivery pipelines.
+
+A typical workflow is:
+
+```text
+Developer commits code
+        |
+        v
+GitHub repository
+        |
+        v
+CI pipeline
+        |
+        v
+Docker multi-stage build
+        |
+        v
+Optimized runtime image
+        |
+        v
+Container registry
+        |
+        v
+Deployment environment
+```
+
+The CI pipeline can build the application using a compiler image and publish only the optimized runtime image.
+
+This keeps build tooling out of the deployed image.
+
+The resulting image can be deployed to services such as Azure Container Apps, Azure Kubernetes Service or other container platforms.
+
+## 19. Key Takeaways
+
+- Docker build context defines which files are available during image construction.
+- The final dot in `docker build ... .` selects the current directory as the build context.
+- `COPY` controls which available files enter the image.
+- Dockerfile instruction order matters when instructions depend on earlier steps.
+- `-t` assigns a name and tag to an image.
+- `go build -o server .` creates the compiled Go executable.
+- `.dockerignore` excludes matching files from the build context.
+- Excluding small files does not necessarily reduce image size significantly.
+- Single-stage builds may retain unnecessary compilers and build artifacts.
+- Multi-stage builds separate compilation from runtime execution.
+- `COPY --from=builder` copies files from a previous build stage.
+- The optimized image successfully ran the same Go HTTP application.
+- The image size decreased from 327 MB to 15.3 MB.
+- The measured reduction was approximately 95.3%.
+- `docker history` helps inspect image construction and layer sizes.
+- Smaller images can improve distribution efficiency and reduce unnecessary software.
+- Multi-stage builds are an important building block for production CI/CD pipelines.
